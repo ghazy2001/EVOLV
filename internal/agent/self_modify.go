@@ -76,7 +76,16 @@ func (a *Agent) SelfModify(opt selfModifyOptions) SelfModifyResult {
 		}
 	}
 
-	// 2. Apply inline file mutations if provided
+	// 2. Apply inline file mutations if provided. Every target is snapshotted before it is
+	// written so the source tree is restored unless the whole operation succeeds.
+	var snapshots []fileSnapshot
+	mutationsKept := false
+	defer func() {
+		if !mutationsKept {
+			restoreSnapshots(snapshots)
+		}
+	}()
+
 	for _, f := range opt.Files {
 		cleanPath := filepath.Clean(f.Path)
 		var target string
@@ -94,6 +103,11 @@ func (a *Agent) SelfModify(opt selfModifyOptions) SelfModifyResult {
 				Error: fmt.Sprintf("file %q escapes source root %q", f.Path, srcRoot),
 			}
 		}
+		snap, err := takeSnapshot(target)
+		if err != nil {
+			return SelfModifyResult{OK: false, Stage: "mutate", Error: err.Error()}
+		}
+		snapshots = append(snapshots, snap)
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return SelfModifyResult{OK: false, Stage: "mutate", Error: err.Error()}
 		}
@@ -254,6 +268,7 @@ func (a *Agent) SelfModify(opt selfModifyOptions) SelfModifyResult {
 		"message":     msg,
 	})
 
+	mutationsKept = true
 	return SelfModifyResult{
 		OK:         true,
 		Tag:        tag,
@@ -312,16 +327,6 @@ func smokeTestCandidate(ctx context.Context, binPath string) error {
 		return nil
 	}
 
-	// Try plain probe
-	cmd = exec.CommandContext(ctx, binPath)
-	_ = cmd.Run()
-	if cmd.ProcessState != nil {
-		code := cmd.ProcessState.ExitCode()
-		if code == 0 || code == 2 {
-			return nil
-		}
-	}
-
 	return fmt.Errorf("candidate binary %s failed smoke test: %s", filepath.Base(binPath), string(out))
 }
 
@@ -342,26 +347,93 @@ func isTemporaryExecutable(path string) bool {
 	return false
 }
 
-// swapExecutable performs an atomic replacement of dst with src, rolling back on failure.
+// swapExecutable replaces dst with src. The candidate is first staged and synced inside dst's
+// directory, so the launcher is only touched once a complete copy is ready. The previous binary
+// is kept as dst+".old" until the staged file is installed and restored if installation fails.
+// A missing dst is a valid first install.
 func swapExecutable(src, dst string) error {
 	dst, err := filepath.Abs(dst)
 	if err != nil {
 		return err
 	}
+
+	staged, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".new-*")
+	if err != nil {
+		return fmt.Errorf("failed to stage candidate binary: %w", err)
+	}
+	stagedPath := staged.Name()
+	_ = staged.Close()
+	defer os.Remove(stagedPath) // no-op once the staged file has been renamed into place
+
+	if err := copyExecutable(src, stagedPath); err != nil {
+		return fmt.Errorf("failed to copy candidate binary: %w", err)
+	}
+	if err := os.Chmod(stagedPath, 0o755); err != nil {
+		return fmt.Errorf("failed to mark candidate binary executable: %w", err)
+	}
+
 	old := dst + ".old"
 	_ = os.Remove(old)
 
+	hadExisting := true
 	if err := os.Rename(dst, old); err != nil {
-		return fmt.Errorf("failed to backup existing binary: %w", err)
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to backup existing binary: %w", err)
+		}
+		hadExisting = false
 	}
 
-	if err := copyExecutable(src, dst); err != nil {
-		_ = os.Rename(old, dst) // rollback
-		return fmt.Errorf("failed to copy candidate binary: %w", err)
+	if err := os.Rename(stagedPath, dst); err != nil {
+		if hadExisting {
+			_ = os.Rename(old, dst) // rollback
+		}
+		return fmt.Errorf("failed to install candidate binary: %w", err)
 	}
 
-	_ = os.Remove(old)
+	if hadExisting {
+		_ = os.Remove(old)
+	}
 	return nil
+}
+
+// fileSnapshot records the prior state of a mutation target so it can be restored.
+type fileSnapshot struct {
+	path    string
+	existed bool
+	data    []byte
+	mode    os.FileMode
+}
+
+// takeSnapshot captures the current contents and permissions of path, or its absence.
+func takeSnapshot(path string) (fileSnapshot, error) {
+	snap := fileSnapshot{path: path}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return snap, nil
+		}
+		return snap, err
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return snap, err
+	}
+	snap.existed = true
+	snap.data = data
+	snap.mode = fi.Mode().Perm()
+	return snap, nil
+}
+
+// restoreSnapshots undoes recorded mutations in reverse order.
+func restoreSnapshots(snapshots []fileSnapshot) {
+	for i := len(snapshots) - 1; i >= 0; i-- {
+		s := snapshots[i]
+		if !s.existed {
+			_ = os.Remove(s.path)
+			continue
+		}
+		_ = os.WriteFile(s.path, s.data, s.mode)
+	}
 }
 
 // copyExecutable copies file contents from src to dst with 0755 permissions.

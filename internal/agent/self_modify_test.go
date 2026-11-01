@@ -224,19 +224,126 @@ func TestPass(t *testing.T) {}
 		t.Fatalf("candidate binary does not exist at %s: %v", res.Candidate, err)
 	}
 
-	// Verify bus emitted kernel:evolved
-	select {
-	case ev := <-sub.Events():
-		if ev.Type == "kernel:evolved" {
-			var payload map[string]any
-			if err := json.Unmarshal(ev.Payload, &payload); err == nil {
-				if payload["tag"] == res.Tag && payload["swapped"] == false {
-					return // Success
-				}
+	// Verify bus emitted kernel:evolved, skipping unrelated events until it arrives
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-sub.Events():
+			if ev.Type != "kernel:evolved" {
+				continue
 			}
+			var payload map[string]any
+			if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+				t.Fatalf("malformed kernel:evolved payload: %v", err)
+			}
+			if payload["tag"] != res.Tag {
+				t.Fatalf("unexpected tag in kernel:evolved: got %v, want %v", payload["tag"], res.Tag)
+			}
+			if payload["swapped"] != false {
+				t.Fatalf("unexpected swapped in kernel:evolved: got %v, want false", payload["swapped"])
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for kernel:evolved event")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for kernel:evolved event")
+	}
+}
+
+// TestSelfModify_RollbackMutationsOnFailure verifies that inline mutations are reverted
+// when the candidate fails verification, restoring edited files and removing created ones.
+func TestSelfModify_RollbackMutationsOnFailure(t *testing.T) {
+	a := testAgent(t)
+	srcDir := setupMockSourceRepo(t, "", "")
+	mainPath := filepath.Join(srcDir, "cmd", "evolv", "main.go")
+	original, err := os.ReadFile(mainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newFile := filepath.Join("cmd", "evolv", "extra.go")
+
+	res := a.SelfModify(selfModifyOptions{
+		SourceRoot: srcDir,
+		Files: []fileMutation{
+			{Path: filepath.Join("cmd", "evolv", "main.go"), Content: "package main\n\nfunc main() { syntax error here }"},
+			{Path: newFile, Content: "package main\n"},
+		},
+	})
+
+	if res.OK || res.Stage != "compile" {
+		t.Fatalf("expected compile failure, got ok=%v stage=%q", res.OK, res.Stage)
+	}
+	restored, err := os.ReadFile(mainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("main.go was not restored after failure, got: %s", restored)
+	}
+	if _, err := os.Stat(filepath.Join(srcDir, newFile)); !os.IsNotExist(err) {
+		t.Fatalf("created file should have been removed after failure, stat err: %v", err)
+	}
+}
+
+// TestSelfModify_KeepMutationsOnStageOnlySuccess verifies mutations are retained on success.
+func TestSelfModify_KeepMutationsOnStageOnlySuccess(t *testing.T) {
+	a := testAgent(t)
+	srcDir := setupMockSourceRepo(t, "", "")
+	newFile := filepath.Join("cmd", "evolv", "extra.go")
+
+	res := a.SelfModify(selfModifyOptions{
+		SourceRoot: srcDir,
+		StageOnly:  true,
+		Files:      []fileMutation{{Path: newFile, Content: "package main\n"}},
+	})
+
+	if !res.OK {
+		t.Fatalf("expected success, got error: %s (stage: %s)", res.Error, res.Stage)
+	}
+	if _, err := os.Stat(filepath.Join(srcDir, newFile)); err != nil {
+		t.Fatalf("mutation should be retained on success: %v", err)
+	}
+}
+
+// TestSwapExecutable_FirstInstall verifies a missing launcher is a valid first install
+// and that no staging leftovers remain.
+func TestSwapExecutable_FirstInstall(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "candidate")
+	if err := os.WriteFile(src, []byte("new binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "launcher")
+
+	if err := swapExecutable(src, dst); err != nil {
+		t.Fatalf("first install failed: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "new binary" {
+		t.Fatalf("unexpected launcher content %q (err: %v)", got, err)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".new-") || strings.HasSuffix(e.Name(), ".old") {
+			t.Fatalf("unexpected leftover after swap: %s", e.Name())
+		}
+	}
+}
+
+// TestSwapExecutable_MissingSourceKeepsLauncher verifies the launcher is untouched
+// when the candidate cannot be staged.
+func TestSwapExecutable_MissingSourceKeepsLauncher(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "launcher")
+	if err := os.WriteFile(dst, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := swapExecutable(filepath.Join(dir, "missing"), dst); err == nil {
+		t.Fatal("expected error when candidate source is missing")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "old binary" {
+		t.Fatalf("launcher should be untouched, got %q (err: %v)", got, err)
 	}
 }
 
