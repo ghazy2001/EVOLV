@@ -172,10 +172,19 @@ func runUpdate() {
 }
 
 func main() {
-	// `evolv update` — in-place self-update from GitHub Releases
-	if len(os.Args) > 1 && (os.Args[1] == "update" || os.Args[1] == "upgrade") {
-		runUpdate()
-		return
+	// CLI subcommands
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "update", "upgrade":
+			runUpdate()
+			return
+		case "export":
+			runExport(os.Args[2:])
+			return
+		case "import":
+			runImport(os.Args[2:])
+			return
+		}
 	}
 	var (
 		port    = flag.Int("port", 0, "port to serve on (0 = config/auto)")
