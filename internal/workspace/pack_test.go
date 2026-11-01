@@ -105,9 +105,18 @@ func TestExportAndImportRoundTrip(t *testing.T) {
 		t.Fatalf("clock component not restored correctly: %v", err)
 	}
 
-	// Verify plugin quarantine
+	// Verify plugin quarantine: all plugin files quarantined, no live plugin files written
 	if !fileExists(filepath.Join(ws2.Dir(PluginsDir), "ticker", "plugin.json.quarantine")) {
 		t.Fatal("plugin.json was not quarantined")
+	}
+	if !fileExists(filepath.Join(ws2.Dir(PluginsDir), "ticker", "plugin.js.quarantine")) {
+		t.Fatal("plugin.js was not quarantined")
+	}
+	if fileExists(filepath.Join(ws2.Dir(PluginsDir), "ticker", "plugin.json")) {
+		t.Fatal("live plugin.json must not exist when quarantined")
+	}
+	if fileExists(filepath.Join(ws2.Dir(PluginsDir), "ticker", "plugin.js")) {
+		t.Fatal("live plugin.js must not exist when quarantined")
 	}
 	if !fileExists(filepath.Join(ws2.Dir(PluginsDir), "ticker", "QUARANTINE.md")) {
 		t.Fatal("QUARANTINE.md notice missing")
@@ -262,5 +271,246 @@ func TestImportChecksumMismatch(t *testing.T) {
 	_, err := ws.Import(bytes.NewReader([]byte("not a gzip file")), ImportOptions{})
 	if err == nil || !strings.Contains(err.Error(), "not a gzip archive") {
 		t.Fatalf("expected gzip error, got: %v", err)
+	}
+}
+
+func buildCustomPackBytes(t *testing.T, manifestFiles []PackFileMeta, tarEntries map[string][]byte) []byte {
+	t.Helper()
+	manifest := PackManifest{
+		Format:    PackFormatV1,
+		Version:   "0.1.0",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Author:    "tester",
+		Files:     manifestFiles,
+	}
+	manifestRaw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+
+	if err := tw.WriteHeader(&tar.Header{
+		Name: ManifestEntryName,
+		Mode: 0o644,
+		Size: int64(len(manifestRaw)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(manifestRaw); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, data := range tarEntries {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: name,
+			Mode: 0o644,
+			Size: int64(len(data)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestImportRejectsDisallowedPaths(t *testing.T) {
+	disallowed := []string{
+		"Config.json",
+		"Workspace/Plugins/evil/plugin.js",
+		"snapshots/snap.json",
+		"logs/app.log",
+		"workspace/plugins/rootfile.js",
+	}
+
+	for _, badPath := range disallowed {
+		payload := []byte("console.log('bad');")
+		sum := sha256.Sum256(payload)
+		packBytes := buildCustomPackBytes(t, []PackFileMeta{
+			{
+				Path:   badPath,
+				SHA256: hex.EncodeToString(sum[:]),
+				Bytes:  int64(len(payload)),
+				Kind:   "other",
+			},
+		}, map[string][]byte{
+			badPath: payload,
+		})
+
+		ws := newTestWorkspace(t)
+		_, err := ws.Import(bytes.NewReader(packBytes), ImportOptions{Force: true})
+		if err == nil {
+			t.Fatalf("expected disallowed path %q to be rejected", badPath)
+		}
+		if !strings.Contains(err.Error(), "disallowed target path") && !strings.Contains(err.Error(), "refusing to pack") {
+			t.Fatalf("unexpected error for %q: %v", badPath, err)
+		}
+	}
+}
+
+func TestImportMissingDeclaredFile(t *testing.T) {
+	presentData := []byte("function ok() {}")
+	presentSum := sha256.Sum256(presentData)
+	missingData := []byte("function missing() {}")
+	missingSum := sha256.Sum256(missingData)
+
+	packBytes := buildCustomPackBytes(t, []PackFileMeta{
+		{
+			Path:   "workspace/tools/ok.js",
+			SHA256: hex.EncodeToString(presentSum[:]),
+			Bytes:  int64(len(presentData)),
+			Kind:   "tool",
+		},
+		{
+			Path:   "workspace/tools/missing.js",
+			SHA256: hex.EncodeToString(missingSum[:]),
+			Bytes:  int64(len(missingData)),
+			Kind:   "tool",
+		},
+	}, map[string][]byte{
+		"workspace/tools/ok.js": presentData,
+	})
+
+	ws := newTestWorkspace(t)
+	_, err := ws.Import(bytes.NewReader(packBytes), ImportOptions{})
+	if err == nil || !strings.Contains(err.Error(), "archive missing declared file") {
+		t.Fatalf("expected missing declared file error, got: %v", err)
+	}
+	if fileExists(filepath.Join(ws.Dir(ToolsDir), "ok.js")) {
+		t.Fatal("ok.js must not be written when archive is missing a declared file")
+	}
+}
+
+func TestImportSkipsExistingPluginWithoutForce(t *testing.T) {
+	ws := newTestWorkspace(t)
+	plugDir := filepath.Join(ws.Dir(PluginsDir), "ticker")
+	if err := os.MkdirAll(plugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origCode := []byte(`evolv.on("tick", function(){ return "local"; });`)
+	if err := os.WriteFile(filepath.Join(plugDir, "plugin.json"), []byte(`{"name":"ticker"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugDir, "plugin.js"), origCode, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	newJSON := []byte(`{"name":"ticker","version":"2"}`)
+	newJSONSum := sha256.Sum256(newJSON)
+	newJS := []byte(`evolv.on("tick", function(){ return "remote"; });`)
+	newJSSum := sha256.Sum256(newJS)
+	extraJS := []byte(`console.log("injected");`)
+	extraSum := sha256.Sum256(extraJS)
+
+	packBytes := buildCustomPackBytes(t, []PackFileMeta{
+		{Path: "workspace/plugins/ticker/plugin.json", SHA256: hex.EncodeToString(newJSONSum[:]), Bytes: int64(len(newJSON)), Kind: "plugin"},
+		{Path: "workspace/plugins/ticker/plugin.js", SHA256: hex.EncodeToString(newJSSum[:]), Bytes: int64(len(newJS)), Kind: "plugin"},
+		{Path: "workspace/plugins/ticker/extra.js", SHA256: hex.EncodeToString(extraSum[:]), Bytes: int64(len(extraJS)), Kind: "plugin"},
+	}, map[string][]byte{
+		"workspace/plugins/ticker/plugin.json": newJSON,
+		"workspace/plugins/ticker/plugin.js":   newJS,
+		"workspace/plugins/ticker/extra.js":    extraJS,
+	})
+
+	// Without Force, existing plugin directory must not be modified or partially injected
+	report, err := ws.Import(bytes.NewReader(packBytes), ImportOptions{
+		Force:             false,
+		QuarantinePlugins: true,
+	})
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+	if len(report.Skipped) != 3 {
+		t.Fatalf("expected all 3 plugin files to be skipped without --force, got skipped=%v", report.Skipped)
+	}
+	gotJS, err := os.ReadFile(filepath.Join(plugDir, "plugin.js"))
+	if err != nil || string(gotJS) != string(origCode) {
+		t.Fatalf("existing plugin.js was modified without --force: %s", string(gotJS))
+	}
+	if fileExists(filepath.Join(plugDir, "extra.js")) || fileExists(filepath.Join(plugDir, "extra.js.quarantine")) {
+		t.Fatal("extra plugin file must not be injected into existing plugin dir without --force")
+	}
+
+	// With Force + QuarantinePlugins, live plugin.json/plugin.js must be replaced by .quarantine files
+	report, err = ws.Import(bytes.NewReader(packBytes), ImportOptions{
+		Force:             true,
+		QuarantinePlugins: true,
+	})
+	if err != nil {
+		t.Fatalf("force quarantine import failed: %v", err)
+	}
+	if len(report.Quarantined) != 3 {
+		t.Fatalf("expected all 3 plugin files quarantined with --force, got %v", report.Quarantined)
+	}
+	if fileExists(filepath.Join(plugDir, "plugin.js")) || fileExists(filepath.Join(plugDir, "plugin.json")) {
+		t.Fatal("live plugin.js or plugin.json remained active after quarantined --force import")
+	}
+	if !fileExists(filepath.Join(plugDir, "plugin.js.quarantine")) || !fileExists(filepath.Join(plugDir, "plugin.json.quarantine")) {
+		t.Fatal("expected quarantined plugin files on disk")
+	}
+}
+
+func TestImportRejectsOversizedEntry(t *testing.T) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	// Write a tar header claiming Size > MaxPackEntryBytes without needing to allocate 16 MiB+ in tests
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "workspace/tools/huge.js",
+		Mode: 0o644,
+		Size: MaxPackEntryBytes + 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Close gzip directly (tar complains on short write, which is fine because Import checks hdr.Size before reading body)
+	_ = gw.Close()
+
+	ws := newTestWorkspace(t)
+	_, err := ws.Import(bytes.NewReader(buf.Bytes()), ImportOptions{})
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum allowed size") {
+		t.Fatalf("expected oversized entry error, got: %v", err)
+	}
+}
+
+func TestImportRejectsSymlinkEscape(t *testing.T) {
+	ws := newTestWorkspace(t)
+	outsideDir := t.TempDir()
+
+	linkDir := filepath.Join(ws.Dir(ToolsDir), "escaped")
+	if err := os.Symlink(outsideDir, linkDir); err != nil {
+		t.Skipf("skipping symlink escape test (os.Symlink unavailable): %v", err)
+	}
+
+	payload := []byte("escaped payload")
+	sum := sha256.Sum256(payload)
+	targetRel := "workspace/tools/escaped/pwn.js"
+	packBytes := buildCustomPackBytes(t, []PackFileMeta{
+		{
+			Path:   targetRel,
+			SHA256: hex.EncodeToString(sum[:]),
+			Bytes:  int64(len(payload)),
+			Kind:   "tool",
+		},
+	}, map[string][]byte{
+		targetRel: payload,
+	})
+
+	_, err := ws.Import(bytes.NewReader(packBytes), ImportOptions{Force: true})
+	if err == nil || !strings.Contains(err.Error(), "security violation") {
+		t.Fatalf("expected symlink escape security violation, got: %v", err)
+	}
+	if fileExists(filepath.Join(outsideDir, "pwn.js")) {
+		t.Fatal("symlink escape wrote file outside workspace root")
 	}
 }

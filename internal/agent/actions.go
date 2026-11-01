@@ -154,6 +154,10 @@ func (r *JSRuntime) loadPluginsLocked() {
 	}
 	sort.Strings(names)
 	for _, n := range names {
+		manifestPath := filepath.Join(r.a.ws.Dir(workspace.PluginsDir), n, "plugin.json")
+		if info, err := os.Stat(manifestPath); err != nil || info.IsDir() {
+			continue
+		}
 		codePath := filepath.Join(r.a.ws.Dir(workspace.PluginsDir), n, "plugin.js")
 		raw, err := os.ReadFile(codePath)
 		if err != nil {

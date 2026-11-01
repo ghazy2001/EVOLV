@@ -55,7 +55,7 @@ type ImportConflict struct {
 	Path      string `json:"path"`
 	Exists    bool   `json:"exists"`
 	Identical bool   `json:"identical"`
-	Action    string `json:"action"` // created | overwritten | skipped | quarantined
+	Action    string `json:"action"` // create | overwrite | skip | quarantine
 }
 
 // ImportReport summarizes the outcome of importing an .evolvpack.
@@ -69,21 +69,26 @@ type ImportReport struct {
 }
 
 const (
-	PackFormatV1     = "evolvpack/v1"
+	PackFormatV1      = "evolvpack/v1"
 	ManifestEntryName = "manifest.json"
-	QuarantineNotice = "QUARANTINE.md"
-	QuarantineSuffix = ".quarantine"
+	QuarantineNotice  = "QUARANTINE.md"
+	QuarantineSuffix  = ".quarantine"
+
+	// Decompression limits to protect against malformed or malicious archive bombs.
+	MaxPackEntryBytes = 16 * 1024 * 1024 // 16 MiB per archive entry
+	MaxPackTotalBytes = 64 * 1024 * 1024 // 64 MiB total unpacked archive payload
+	MaxPackEntries    = 4096
 )
 
 // secretPatterns catches common token shapes to prevent accidental credential leakage.
 var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)sk-[a-zA-Z0-9]{20,}`),
+	regexp.MustCompile(`(?i)sk-[a-zA-Z0-9_-]{20,}`),
 	regexp.MustCompile(`(?i)sk-ant-[a-zA-Z0-9_-]{20,}`),
-	regexp.MustCompile(`(?i)(?:ghp_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9_]{20,})`),
+	regexp.MustCompile(`(?i)(?:gh[pousr]_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9_]{20,})`),
 	regexp.MustCompile(`(?i)AKIA[0-9A-Z]{16}`),
 }
 
-// scanSecrets inspects file content for credentials before packaging.
+// scanSecrets inspects file content for credentials before packaging or importing.
 func scanSecrets(relPath string, data []byte) error {
 	base := filepath.Base(relPath)
 	if strings.EqualFold(base, ConfigFile) {
@@ -100,6 +105,45 @@ func scanSecrets(relPath string, data []byte) error {
 func fileExists(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && !info.IsDir()
+}
+
+// isAllowedPackPath enforces an exact-case allowlist of workspace paths permitted in an .evolvpack.
+func isAllowedPackPath(clean string) bool {
+	if clean == "" || strings.ContainsRune(clean, '\\') {
+		return false
+	}
+	switch clean {
+	case "workspace/ui/style.css", "workspace/ui/app.js", "workspace/ui/index.html", EvolutionFile:
+		return true
+	}
+	if rest, ok := strings.CutPrefix(clean, "workspace/plugins/"); ok {
+		// Require workspace/plugins/<plugin>/<file>
+		idx := strings.IndexByte(rest, '/')
+		return idx > 0 && idx < len(rest)-1
+	}
+	for _, prefix := range []string{
+		"workspace/ui/components/",
+		"workspace/tools/",
+		"workspace/skills/",
+		"workspace/prompts/",
+	} {
+		if rest, ok := strings.CutPrefix(clean, prefix); ok && rest != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func extractPluginName(clean string) (string, bool) {
+	rest, ok := strings.CutPrefix(clean, "workspace/plugins/")
+	if !ok {
+		return "", false
+	}
+	idx := strings.IndexByte(rest, '/')
+	if idx <= 0 {
+		return "", false
+	}
+	return rest[:idx], true
 }
 
 func classifyKind(rel string) string {
@@ -127,9 +171,14 @@ func classifyKind(rel string) string {
 // Export streams an .evolvpack tar.gz archive into out.
 func (w *W) Export(out io.Writer, opts ExportOptions) (*PackManifest, error) {
 	gw := gzip.NewWriter(out)
-	defer gw.Close()
 	tw := tar.NewWriter(gw)
-	defer tw.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = tw.Close()
+			_ = gw.Close()
+		}
+	}()
 
 	author := strings.TrimSpace(opts.Author)
 	if author == "" && w.Config != nil {
@@ -174,12 +223,15 @@ func (w *W) Export(out io.Writer, opts ExportOptions) (*PackManifest, error) {
 		full := w.Dir(d)
 		info, err := os.Stat(full)
 		if err != nil {
-			continue
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("stat %s: %w", d, err)
 		}
 		if !info.IsDir() {
 			data, err := os.ReadFile(full)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("reading %s: %w", d, err)
 			}
 			rel := filepath.ToSlash(d)
 			if err := scanSecrets(rel, data); err != nil {
@@ -198,12 +250,12 @@ func (w *W) Export(out io.Writer, opts ExportOptions) (*PackManifest, error) {
 			}
 			rel, err := filepath.Rel(w.Root, p)
 			if err != nil {
-				return nil
+				return fmt.Errorf("resolving relative path for %s: %w", p, err)
 			}
 			rel = filepath.ToSlash(rel)
 			data, err := os.ReadFile(p)
 			if err != nil {
-				return nil
+				return fmt.Errorf("reading %s: %w", rel, err)
 			}
 			if err := scanSecrets(rel, data); err != nil {
 				return err
@@ -269,6 +321,14 @@ func (w *W) Export(out io.Writer, opts ExportOptions) (*PackManifest, error) {
 		}
 	}
 
+	closed = true
+	if err := tw.Close(); err != nil {
+		_ = gw.Close()
+		return nil, err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, err
+	}
 	return manifest, nil
 }
 
@@ -313,6 +373,44 @@ func (w *W) ExportFile(destPath string, opts ExportOptions) (*PackManifest, erro
 	return manifest, nil
 }
 
+func readBoundedEntry(r io.Reader, name string, maxBytes int64) ([]byte, error) {
+	limited := io.LimitReader(r, maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", name, err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("archive entry %s exceeds maximum allowed size (%d bytes)", name, maxBytes)
+	}
+	return data, nil
+}
+
+func checkNoSymlinkComponents(root *os.Root, slashRel string) error {
+	parts := strings.Split(slashRel, "/")
+	var cur string
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		if cur == "" {
+			cur = part
+		} else {
+			cur = cur + "/" + part
+		}
+		info, err := root.Lstat(filepath.FromSlash(cur))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				break
+			}
+			return fmt.Errorf("security violation: cannot inspect destination %s: %w", cur, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("security violation: destination traverses symlink %s", cur)
+		}
+	}
+	return nil
+}
+
 // Import unpacks an .evolvpack from in into the workspace.
 func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 	gr, err := gzip.NewReader(in)
@@ -324,6 +422,8 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 
 	tarFiles := map[string][]byte{}
 	var manifest *PackManifest
+	var totalBytes int64
+	entryCount := 0
 
 	for {
 		hdr, err := tr.Next()
@@ -336,18 +436,39 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 		if hdr.Typeflag == tar.TypeDir {
 			continue
 		}
-
-		clean := filepath.ToSlash(filepath.Clean(hdr.Name))
-		if strings.HasPrefix(clean, "../") || clean == ".." || filepath.IsAbs(clean) {
-			return nil, fmt.Errorf("security violation: illegal path in archive: %q", hdr.Name)
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			return nil, fmt.Errorf("security violation: unsupported archive entry type for %q", hdr.Name)
 		}
 
-		data, err := io.ReadAll(tr)
+		entryCount++
+		if entryCount > MaxPackEntries {
+			return nil, fmt.Errorf("archive exceeds maximum allowed file count (%d)", MaxPackEntries)
+		}
+
+		if strings.ContainsRune(hdr.Name, '\\') {
+			return nil, fmt.Errorf("security violation: illegal path separator in archive: %q", hdr.Name)
+		}
+		clean := filepath.ToSlash(filepath.Clean(hdr.Name))
+		if strings.HasPrefix(clean, "../") || clean == ".." || strings.HasPrefix(clean, "/") || filepath.IsAbs(clean) {
+			return nil, fmt.Errorf("security violation: illegal path in archive: %q", hdr.Name)
+		}
+		if hdr.Size > MaxPackEntryBytes {
+			return nil, fmt.Errorf("archive entry %s exceeds maximum allowed size (%d bytes)", hdr.Name, MaxPackEntryBytes)
+		}
+
+		data, err := readBoundedEntry(tr, hdr.Name, MaxPackEntryBytes)
 		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", hdr.Name, err)
+			return nil, err
+		}
+		totalBytes += int64(len(data))
+		if totalBytes > MaxPackTotalBytes {
+			return nil, fmt.Errorf("archive exceeds maximum total unpacked size (%d bytes)", MaxPackTotalBytes)
 		}
 
 		if clean == ManifestEntryName {
+			if manifest != nil {
+				return nil, errors.New("invalid package: duplicate manifest.json entry")
+			}
 			var m PackManifest
 			if err := json.Unmarshal(data, &m); err != nil {
 				return nil, fmt.Errorf("invalid manifest.json in package: %w", err)
@@ -356,6 +477,9 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 			continue
 		}
 
+		if _, dup := tarFiles[clean]; dup {
+			return nil, fmt.Errorf("invalid package: duplicate archive entry %q", clean)
+		}
 		tarFiles[clean] = data
 	}
 
@@ -366,13 +490,33 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 		return nil, fmt.Errorf("unsupported package format: %s", manifest.Format)
 	}
 
-	// Validate checksums against manifest
-	metaByPath := map[string]PackFileMeta{}
+	// Build manifest index and verify every declared file is valid and present in archive
+	metaByPath := make(map[string]PackFileMeta, len(manifest.Files))
 	for _, meta := range manifest.Files {
-		metaByPath[filepath.ToSlash(meta.Path)] = meta
+		if strings.ContainsRune(meta.Path, '\\') {
+			return nil, fmt.Errorf("security violation: illegal path in manifest: %q", meta.Path)
+		}
+		norm := filepath.ToSlash(filepath.Clean(meta.Path))
+		if !isAllowedPackPath(norm) {
+			return nil, fmt.Errorf("security violation: disallowed target path in manifest: %q", meta.Path)
+		}
+		if _, dup := metaByPath[norm]; dup {
+			return nil, fmt.Errorf("invalid manifest: duplicate file entry %q", norm)
+		}
+		if _, ok := tarFiles[norm]; !ok {
+			return nil, fmt.Errorf("archive missing declared file: %s", norm)
+		}
+		metaByPath[norm] = meta
 	}
 
-	// Sort file paths for deterministic processing
+	// Open workspace-confined root handle to prevent symlink escape during checks and writes
+	root, err := os.OpenRoot(w.Root)
+	if err != nil {
+		return nil, fmt.Errorf("opening workspace root: %w", err)
+	}
+	defer root.Close()
+
+	// Sort file paths for deterministic validation and dry-run plans
 	keys := make([]string, 0, len(tarFiles))
 	for k := range tarFiles {
 		keys = append(keys, k)
@@ -380,12 +524,24 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 	sort.Strings(keys)
 
 	type pendingWrite struct {
-		destPath  string
+		relDest   string
+		removeRel string
 		data      []byte
 		noticeDir string
 		noticeMsg string
 	}
 	var writes []pendingWrite
+	writtenNotices := map[string]bool{}
+	existingPluginDirs := map[string]bool{}
+
+	for _, path := range keys {
+		if pluginName, ok := extractPluginName(path); ok {
+			if _, checked := existingPluginDirs[pluginName]; !checked {
+				_, statErr := root.Lstat(filepath.FromSlash("workspace/plugins/" + pluginName))
+				existingPluginDirs[pluginName] = statErr == nil
+			}
+		}
+	}
 
 	report := &ImportReport{
 		Manifest:    manifest,
@@ -398,6 +554,9 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 
 	// Pass 1: Pre-flight validation of all entries before modifying disk
 	for _, path := range keys {
+		if !isAllowedPackPath(path) {
+			return nil, fmt.Errorf("security violation: disallowed target path in archive: %q", path)
+		}
 		data := tarFiles[path]
 		meta, ok := metaByPath[path]
 		if !ok {
@@ -409,41 +568,47 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 			return nil, fmt.Errorf("checksum mismatch for %s: manifest=%s actual=%s", path, meta.SHA256, actualSum)
 		}
 
-		// Security scan imported files as well
 		if err := scanSecrets(path, data); err != nil {
 			return nil, err
 		}
 
-		dest := w.Dir(path)
-		// Ensure destination is strictly inside w.Root
-		relCheck, err := filepath.Rel(w.Root, dest)
-		if err != nil || strings.HasPrefix(filepath.ToSlash(relCheck), "../") || filepath.IsAbs(relCheck) {
-			return nil, fmt.Errorf("security violation: path escapes workspace root: %s", path)
+		if err := checkNoSymlinkComponents(root, path); err != nil {
+			return nil, err
+		}
+		if err := checkNoSymlinkComponents(root, path+QuarantineSuffix); err != nil {
+			return nil, err
 		}
 
-		exists := fileExists(dest)
+		osRel := filepath.FromSlash(path)
+		info, statErr := root.Stat(osRel)
+		exists := statErr == nil && !info.IsDir()
 		identical := false
 		action := "create"
 
 		if exists {
-			cur, err := os.ReadFile(dest)
-			if err == nil {
-				curSum := sha256.Sum256(cur)
-				if hex.EncodeToString(curSum[:]) == meta.SHA256 {
-					identical = true
-					action = "skip"
-				} else if opts.Force {
-					action = "overwrite"
-				} else {
-					action = "skip"
-				}
+			cur, readErr := root.ReadFile(osRel)
+			if readErr != nil {
+				return nil, fmt.Errorf("reading existing %s: %w", path, readErr)
+			}
+			curSum := sha256.Sum256(cur)
+			if hex.EncodeToString(curSum[:]) == meta.SHA256 {
+				identical = true
+				action = "skip"
+			} else if opts.Force {
+				action = "overwrite"
+			} else {
+				action = "skip"
 			}
 		}
 
-		// Plugin quarantine: if quarantine is enabled, quarantine incoming plugins
-		isPlugin := strings.HasPrefix(path, "workspace/plugins/")
-		if isPlugin && opts.QuarantinePlugins {
-			action = "quarantine"
+		pluginName, isPlugin := extractPluginName(path)
+		if isPlugin {
+			if existingPluginDirs[pluginName] && !opts.Force {
+				// Never overwrite or inject code into an existing plugin directory without --force.
+				action = "skip"
+			} else if opts.QuarantinePlugins {
+				action = "quarantine"
+			}
 		}
 
 		report.Conflicts = append(report.Conflicts, ImportConflict{
@@ -458,12 +623,25 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 			continue
 		}
 
-		finalDest := dest
-		var noticeDir, noticeMsg string
-		if action == "quarantine" && strings.HasSuffix(path, "plugin.json") {
-			finalDest = dest + QuarantineSuffix
-			noticeDir = filepath.Dir(dest)
-			noticeMsg = fmt.Sprintf("# QUARANTINE NOTICE\n\nPlugin %s was imported from an external .evolvpack.\nReview plugin.js before enabling.\nTo enable: rename plugin.json.quarantine -> plugin.json\n", filepath.Base(filepath.Dir(dest)))
+		relDest := path
+		var removeRel, noticeDir, noticeMsg string
+		if action == "quarantine" {
+			relDest = path + QuarantineSuffix
+			if exists {
+				removeRel = path
+			}
+			pDir := "workspace/plugins/" + pluginName
+			if err := checkNoSymlinkComponents(root, pDir+"/"+QuarantineNotice); err != nil {
+				return nil, err
+			}
+			if !writtenNotices[pDir] {
+				writtenNotices[pDir] = true
+				noticeDir = pDir
+				noticeMsg = fmt.Sprintf(
+					"# QUARANTINE NOTICE\n\nPlugin %s was imported from an external .evolvpack.\nReview plugin.js.quarantine and plugin.json.quarantine before enabling.\nTo enable: remove the %s suffix from quarantined files.\n",
+					pluginName, QuarantineSuffix,
+				)
+			}
 			report.Quarantined = append(report.Quarantined, path)
 		} else if action == "create" {
 			report.Created = append(report.Created, path)
@@ -472,7 +650,8 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 		}
 
 		writes = append(writes, pendingWrite{
-			destPath:  finalDest,
+			relDest:   relDest,
+			removeRel: removeRel,
 			data:      data,
 			noticeDir: noticeDir,
 			noticeMsg: noticeMsg,
@@ -483,21 +662,32 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 		return report, nil
 	}
 
-	// Pass 2: Execute disk writes only after full validation passed
+	// Pass 2: Execute all filesystem writes strictly through workspace-confined os.Root
 	for _, pw := range writes {
 		if pw.noticeDir != "" {
-			if err := os.MkdirAll(pw.noticeDir, 0o755); err != nil {
+			osNoticeDir := filepath.FromSlash(pw.noticeDir)
+			if err := root.MkdirAll(osNoticeDir, 0o755); err != nil {
 				return nil, err
 			}
-			if err := os.WriteFile(filepath.Join(pw.noticeDir, QuarantineNotice), []byte(pw.noticeMsg), 0o644); err != nil {
+			noticePath := filepath.FromSlash(pw.noticeDir + "/" + QuarantineNotice)
+			if err := root.WriteFile(noticePath, []byte(pw.noticeMsg), 0o644); err != nil {
 				return nil, err
 			}
 		}
 
-		if err := os.MkdirAll(filepath.Dir(pw.destPath), 0o755); err != nil {
-			return nil, err
+		if pw.removeRel != "" {
+			if err := root.Remove(filepath.FromSlash(pw.removeRel)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return nil, err
+			}
 		}
-		if err := os.WriteFile(pw.destPath, pw.data, 0o644); err != nil {
+
+		parentSlash := filepath.ToSlash(filepath.Dir(filepath.FromSlash(pw.relDest)))
+		if parentSlash != "." && parentSlash != "" {
+			if err := root.MkdirAll(filepath.FromSlash(parentSlash), 0o755); err != nil {
+				return nil, err
+			}
+		}
+		if err := root.WriteFile(filepath.FromSlash(pw.relDest), pw.data, 0o644); err != nil {
 			return nil, err
 		}
 	}
