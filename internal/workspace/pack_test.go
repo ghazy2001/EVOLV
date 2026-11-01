@@ -1,11 +1,17 @@
 package workspace
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestWorkspace(t *testing.T) *W {
@@ -145,29 +151,115 @@ func TestExportNeverPackagesConfig(t *testing.T) {
 	}
 }
 
-func TestImportChecksumMismatch(t *testing.T) {
-	ws1 := newTestWorkspace(t)
-	compPath := filepath.Join(ws1.Dir(UIComponentsRel()), "btn.html")
-	os.WriteFile(compPath, []byte("<button>Click</button>"), 0o644)
+func TestExportFileAtomicFailure(t *testing.T) {
+	ws := newTestWorkspace(t)
 
-	var buf bytes.Buffer
-	manifest, err := ws1.Export(&buf, ExportOptions{})
-	if err != nil {
-		t.Fatal(err)
+	// Inject secret to trigger export failure
+	leakyComp := filepath.Join(ws.Dir(UIComponentsRel()), "leak.html")
+	os.WriteFile(leakyComp, []byte("const token = 'ghp_123456789012345678901234567890';"), 0o644)
+
+	destPath := filepath.Join(t.TempDir(), "failed-output.evolvpack")
+	_, err := ws.ExportFile(destPath, ExportOptions{})
+	if err == nil {
+		t.Fatal("expected export failure on credential token")
 	}
 
-	// Corrupt manifest file hash
-	manifest.Files[0].SHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+	// Verify destPath was NOT created or left as zero-byte file
+	if fileExists(destPath) {
+		t.Fatalf("destPath should not exist after export failure: %s", destPath)
+	}
+}
 
-	// Re-encode corrupt package
-	var corruptBuf bytes.Buffer
-	// Create another package where file content does not match manifest
-	ws2 := newTestWorkspace(t)
-	// Mutate ws1 file after export and re-export with old manifest
-	_ = corruptBuf
+func TestScanSecretsCaseInsensitive(t *testing.T) {
+	if err := scanSecrets("workspace/Config.JSON", []byte("{}")); err == nil {
+		t.Fatal("expected rejection of Config.JSON regardless of case")
+	}
+	if err := scanSecrets("workspace/CONFIG.json", []byte("{}")); err == nil {
+		t.Fatal("expected rejection of CONFIG.json regardless of case")
+	}
+}
+
+func TestImportPreflightAtomicity(t *testing.T) {
+	// Build a package manually with:
+	// 1. good.html (declared and valid)
+	// 2. bad.html (checksum mismatch)
+	goodData := []byte("<div>Good</div>")
+	goodSum := sha256.Sum256(goodData)
+
+	badData := []byte("<div>Tampered</div>")
+
+	manifest := PackManifest{
+		Format:    PackFormatV1,
+		Version:   "0.1.0",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Author:    "tester",
+		Files: []PackFileMeta{
+			{
+				Path:   "workspace/ui/components/good.html",
+				SHA256: hex.EncodeToString(goodSum[:]),
+				Bytes:  int64(len(goodData)),
+				Kind:   "component",
+			},
+			{
+				Path:   "workspace/ui/components/bad.html",
+				SHA256: "0000000000000000000000000000000000000000000000000000000000000000", // invalid
+				Bytes:  int64(len(badData)),
+				Kind:   "component",
+			},
+		},
+	}
+	manifestRaw, _ := json.Marshal(manifest)
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+
+	// Write manifest.json
+	_ = tw.WriteHeader(&tar.Header{
+		Name: ManifestEntryName,
+		Mode: 0o644,
+		Size: int64(len(manifestRaw)),
+	})
+	_, _ = tw.Write(manifestRaw)
+
+	// Write good.html
+	_ = tw.WriteHeader(&tar.Header{
+		Name: "workspace/ui/components/good.html",
+		Mode: 0o644,
+		Size: int64(len(goodData)),
+	})
+	_, _ = tw.Write(goodData)
+
+	// Write bad.html
+	_ = tw.WriteHeader(&tar.Header{
+		Name: "workspace/ui/components/bad.html",
+		Mode: 0o644,
+		Size: int64(len(badData)),
+	})
+	_, _ = tw.Write(badData)
+
+	_ = tw.Close()
+	_ = gw.Close()
+
+	// Attempt import into fresh workspace
+	targetWS := newTestWorkspace(t)
+	_, err := targetWS.Import(bytes.NewReader(buf.Bytes()), ImportOptions{})
+	if err == nil {
+		t.Fatal("expected import to fail due to checksum mismatch on bad.html")
+	}
+
+	// Verify that good.html was NEVER written to disk due to pre-flight check
+	goodOnDisk := filepath.Join(targetWS.Dir(UIComponentsRel()), "good.html")
+	if fileExists(goodOnDisk) {
+		t.Fatalf("atomicity violation: good.html was written to disk despite package corruption: %s", goodOnDisk)
+	}
+}
+
+func TestImportChecksumMismatch(t *testing.T) {
+	ws := newTestWorkspace(t)
 
 	// Test corrupt reader import fails cleanly
-	_, err = ws2.Import(bytes.NewReader([]byte("not a gzip file")), ImportOptions{})
+	_, err := ws.Import(bytes.NewReader([]byte("not a gzip file")), ImportOptions{})
 	if err == nil || !strings.Contains(err.Error(), "not a gzip archive") {
 		t.Fatalf("expected gzip error, got: %v", err)
 	}

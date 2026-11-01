@@ -69,10 +69,10 @@ type ImportReport struct {
 }
 
 const (
-	PackFormatV1       = "evolvpack/v1"
-	ManifestEntryName  = "manifest.json"
-	QuarantineNotice   = "QUARANTINE.md"
-	QuarantineSuffix   = ".quarantine"
+	PackFormatV1     = "evolvpack/v1"
+	ManifestEntryName = "manifest.json"
+	QuarantineNotice = "QUARANTINE.md"
+	QuarantineSuffix = ".quarantine"
 )
 
 // secretPatterns catches common token shapes to prevent accidental credential leakage.
@@ -86,7 +86,7 @@ var secretPatterns = []*regexp.Regexp{
 // scanSecrets inspects file content for credentials before packaging.
 func scanSecrets(relPath string, data []byte) error {
 	base := filepath.Base(relPath)
-	if base == ConfigFile {
+	if strings.EqualFold(base, ConfigFile) {
 		return fmt.Errorf("refusing to pack %s: configuration files may contain private API keys", relPath)
 	}
 	for _, re := range secretPatterns {
@@ -193,7 +193,7 @@ func (w *W) Export(out io.Writer, opts ExportOptions) (*PackManifest, error) {
 			if err != nil {
 				return err
 			}
-			if entry.IsDir() {
+			if entry.IsDir() || !entry.Type().IsRegular() {
 				return nil
 			}
 			rel, err := filepath.Rel(w.Root, p)
@@ -272,20 +272,45 @@ func (w *W) Export(out io.Writer, opts ExportOptions) (*PackManifest, error) {
 	return manifest, nil
 }
 
-// ExportFile exports workspace contents to a file path.
+// ExportFile exports workspace contents to a file path atomically.
 func (w *W) ExportFile(destPath string, opts ExportOptions) (*PackManifest, error) {
 	if destPath == "" {
 		destPath = fmt.Sprintf("evolv-%s.evolvpack", time.Now().UTC().Format("20060102-150405"))
 	}
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil && filepath.Dir(destPath) != "." {
-		return nil, err
+	dir := filepath.Dir(destPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	} else {
+		dir = "."
 	}
-	f, err := os.Create(destPath)
+
+	tmpFile, err := os.CreateTemp(dir, ".evolvpack-*.tmp")
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	return w.Export(f, opts)
+	tmpName := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpName)
+	}()
+
+	manifest, err := w.Export(tmpFile, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return nil, err
+	}
+
+	if fileExists(destPath) {
+		_ = os.Remove(destPath)
+	}
+	if err := os.Rename(tmpName, destPath); err != nil {
+		return nil, err
+	}
+	return manifest, nil
 }
 
 // Import unpacks an .evolvpack from in into the workspace.
@@ -347,12 +372,33 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 		metaByPath[filepath.ToSlash(meta.Path)] = meta
 	}
 
+	// Sort file paths for deterministic processing
+	keys := make([]string, 0, len(tarFiles))
+	for k := range tarFiles {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	type pendingWrite struct {
+		destPath  string
+		data      []byte
+		noticeDir string
+		noticeMsg string
+	}
+	var writes []pendingWrite
+
 	report := &ImportReport{
-		Manifest:  manifest,
-		Conflicts: []ImportConflict{},
+		Manifest:    manifest,
+		Conflicts:   make([]ImportConflict, 0, len(keys)),
+		Created:     []string{},
+		Overwritten: []string{},
+		Skipped:     []string{},
+		Quarantined: []string{},
 	}
 
-	for path, data := range tarFiles {
+	// Pass 1: Pre-flight validation of all entries before modifying disk
+	for _, path := range keys {
+		data := tarFiles[path]
 		meta, ok := metaByPath[path]
 		if !ok {
 			return nil, fmt.Errorf("archive contains undeclared file: %s", path)
@@ -369,6 +415,12 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 		}
 
 		dest := w.Dir(path)
+		// Ensure destination is strictly inside w.Root
+		relCheck, err := filepath.Rel(w.Root, dest)
+		if err != nil || strings.HasPrefix(filepath.ToSlash(relCheck), "../") || filepath.IsAbs(relCheck) {
+			return nil, fmt.Errorf("security violation: path escapes workspace root: %s", path)
+		}
+
 		exists := fileExists(dest)
 		identical := false
 		action := "create"
@@ -394,17 +446,12 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 			action = "quarantine"
 		}
 
-		conflict := ImportConflict{
+		report.Conflicts = append(report.Conflicts, ImportConflict{
 			Path:      path,
 			Exists:    exists,
 			Identical: identical,
 			Action:    action,
-		}
-		report.Conflicts = append(report.Conflicts, conflict)
-
-		if opts.DryRun {
-			continue
-		}
+		})
 
 		if action == "skip" {
 			report.Skipped = append(report.Skipped, path)
@@ -412,26 +459,46 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 		}
 
 		finalDest := dest
+		var noticeDir, noticeMsg string
 		if action == "quarantine" && strings.HasSuffix(path, "plugin.json") {
-			// Rename plugin.json to plugin.json.quarantine so it requires explicit enable
 			finalDest = dest + QuarantineSuffix
-			notice := fmt.Sprintf("# QUARANTINE NOTICE\n\nPlugin %s was imported from an external .evolvpack.\nReview plugin.js before enabling.\nTo enable: rename plugin.json.quarantine -> plugin.json\n", filepath.Base(filepath.Dir(dest)))
-			_ = os.MkdirAll(filepath.Dir(dest), 0o755)
-			_ = os.WriteFile(filepath.Join(filepath.Dir(dest), QuarantineNotice), []byte(notice), 0o644)
+			noticeDir = filepath.Dir(dest)
+			noticeMsg = fmt.Sprintf("# QUARANTINE NOTICE\n\nPlugin %s was imported from an external .evolvpack.\nReview plugin.js before enabling.\nTo enable: rename plugin.json.quarantine -> plugin.json\n", filepath.Base(filepath.Dir(dest)))
 			report.Quarantined = append(report.Quarantined, path)
-		}
-
-		if err := os.MkdirAll(filepath.Dir(finalDest), 0o755); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(finalDest, data, 0o644); err != nil {
-			return nil, err
-		}
-
-		if action == "create" {
+		} else if action == "create" {
 			report.Created = append(report.Created, path)
 		} else if action == "overwrite" {
 			report.Overwritten = append(report.Overwritten, path)
+		}
+
+		writes = append(writes, pendingWrite{
+			destPath:  finalDest,
+			data:      data,
+			noticeDir: noticeDir,
+			noticeMsg: noticeMsg,
+		})
+	}
+
+	if opts.DryRun {
+		return report, nil
+	}
+
+	// Pass 2: Execute disk writes only after full validation passed
+	for _, pw := range writes {
+		if pw.noticeDir != "" {
+			if err := os.MkdirAll(pw.noticeDir, 0o755); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(filepath.Join(pw.noticeDir, QuarantineNotice), []byte(pw.noticeMsg), 0o644); err != nil {
+				return nil, err
+			}
+		}
+
+		if err := os.MkdirAll(filepath.Dir(pw.destPath), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(pw.destPath, pw.data, 0o644); err != nil {
+			return nil, err
 		}
 	}
 
