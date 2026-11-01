@@ -530,6 +530,59 @@ func (a *Agent) Execute(act action) string {
 		res["truncated"] = mapped.Truncated
 		res["cache"] = cache
 
+	case "run_tests":
+		target := strings.TrimSpace(act.Path)
+		if target == "" {
+			target = act.Cwd
+		}
+		if target == "" {
+			target = a.ws.Config.ProjectDir
+		}
+		if target == "" {
+			target = a.ws.Root
+		}
+		abs, err := filepath.Abs(target)
+		if err != nil || !dirExists(abs) {
+			res["ok"], res["error"] = false, "directory does not exist: " + target
+			break
+		}
+
+		fw := strings.ToLower(strings.TrimSpace(act.Framework))
+		if fw == "" {
+			detected, err := detectTestFramework(abs)
+			if err != nil {
+				res["ok"], res["error"] = false, err.Error()
+				break
+			}
+			fw = detected
+		}
+
+		ctx, cancel := contextWithTimeout(180 * time.Second)
+		defer cancel()
+		tRes, err := runTestsSuite(ctx, fw, abs)
+		if err != nil {
+			res["ok"], res["error"] = false, err.Error()
+			break
+		}
+		res["ok"] = tRes.Failed == 0
+		res["framework"] = tRes.Framework
+		res["target"] = tRes.Target
+		res["passed"] = tRes.Passed
+		res["failed"] = tRes.Failed
+		res["skipped"] = tRes.Skipped
+		res["total"] = tRes.Total
+		res["duration_ms"] = tRes.DurationMS
+		res["summary"] = tRes.Summary
+		if len(tRes.Failures) > 0 {
+			res["failures"] = tRes.Failures
+		}
+		if tRes.Failed > 0 {
+			res["error"] = tRes.Summary
+			if tRes.Raw != "" {
+				res["raw"] = tRes.Raw
+			}
+		}
+
 	case "delete_file":
 		p, ok := a.resolvePath(act.Path, &res)
 		if !ok {

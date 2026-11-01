@@ -115,6 +115,7 @@ type action struct {
 	Depth          int               `json:"depth"`
 	Cwd            string            `json:"cwd"`
 	Command        string            `json:"command"`
+	Framework      string            `json:"framework"`
 	Args           map[string]any    `json:"args"`
 	Steps          []planStepArg     `json:"steps"`
 	Schema         map[string]string `json:"schema"`

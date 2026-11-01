@@ -114,6 +114,8 @@ general agent powers (absolute paths OK everywhere):
 - tree              {path, depth}                            → recursive file tree (default depth 2)
 - map_repo          {path?, depth?}                          → bounded tree + Go/JS/TS symbol outline;
   defaults to the bound project and caches the result at workspace/repo-map.json
+- run_tests         {path?, framework?}                      → runs test suite with auto-detection (go,
+  node, python, cargo) and parses structured pass/fail/skip counts and failure diagnostics
 - delete_file       {path}                                   → permanent delete; be careful
 - move              {from, to}
 - set_project       {path}                                   → binds the user's project root
