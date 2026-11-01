@@ -82,6 +82,9 @@ self-evolution:
   into your own system prompt every turn — keep it honest and current
 - plan_advance      {index?}                                 → mark a step done (default: the
   doing step) and pull the next todo into doing; one call = one step of progress
+- complete_task     {summary, status?, files?, tests_passed?, tests_failed?, confidence?, notes?, plan_title?} →
+  emit a structured mission completion report (status success|partial|blocked|failed, confidence high|medium|low);
+  on success, automatically marks remaining active plan steps as done and broadcasts a completion card to the UI.
 - evolve_component  {name, title, icon, description, html}   → hot-mounts a live panel instantly
 - remove_component  {name}
 - evolve_tool       {name, description, code, schema?}       → compiles a JS tool callable via run_tool.

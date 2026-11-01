@@ -659,6 +659,9 @@ func (a *Agent) Execute(act action) string {
 			res["ok"], res["error"] = false, err.Error()
 			break
 		}
+		a.mu.Lock()
+		a.planActiveInTurn = true
+		a.mu.Unlock()
 		publishPlan(a, plan)
 		res["ok"] = true
 		res["step"] = plan.Steps[idx].Title
@@ -697,9 +700,104 @@ func (a *Agent) Execute(act action) string {
 			res["ok"], res["error"] = false, err.Error()
 			break
 		}
+		a.mu.Lock()
+		a.planActiveInTurn = true
+		a.mu.Unlock()
 		publishPlan(a, &plan)
 		res["ok"] = true
 		res["note"] = fmt.Sprintf("plan updated: %d/%d steps done", countDone(plan.Steps), len(plan.Steps))
+
+	case "complete_task":
+		summary := strings.TrimSpace(act.Summary)
+		if summary == "" {
+			summary = strings.TrimSpace(act.Desc)
+		}
+		if summary == "" {
+			summary = strings.TrimSpace(act.Title)
+		}
+		if summary == "" {
+			res["ok"] = false
+			res["error"] = "complete_task needs summary"
+			break
+		}
+
+		rawStatus := strings.TrimSpace(act.Status)
+		status := strings.ToLower(rawStatus)
+		if status == "" {
+			status = "success"
+		} else if status != "success" && status != "partial" && status != "blocked" && status != "failed" {
+			res["ok"] = false
+			res["error"] = fmt.Sprintf("invalid complete_task status %q (expected success, partial, blocked, or failed)", rawStatus)
+			break
+		}
+
+		confidence := strings.ToLower(strings.TrimSpace(act.Confidence))
+		if confidence == "" {
+			confidence = "high"
+		}
+		switch confidence {
+		case "high", "medium", "low":
+		default:
+			confidence = "high"
+		}
+
+		files := act.Files
+		if files == nil {
+			files = []string{}
+		}
+
+		// When task succeeded, complete remaining steps only if the persisted plan belongs to this active task
+		if status == "success" {
+			if plan := a.ws.ReadPlan(); plan != nil && len(plan.Steps) > 0 {
+				a.mu.Lock()
+				planActive := a.planActiveInTurn
+				a.mu.Unlock()
+				explicitMatch := strings.TrimSpace(act.PlanTitle) != "" &&
+					strings.EqualFold(strings.TrimSpace(act.PlanTitle), strings.TrimSpace(plan.Title))
+				if planActive || explicitMatch {
+					mutated := false
+					for i := range plan.Steps {
+						if plan.Steps[i].Status != "done" {
+							plan.Steps[i].Status = "done"
+							mutated = true
+						}
+					}
+					if mutated {
+						if err := a.ws.WritePlan(*plan); err != nil {
+							res["ok"] = false
+							res["error"] = "failed to update plan: " + err.Error()
+							break
+						}
+						publishPlan(a, plan)
+					}
+				}
+			}
+		}
+
+		report := map[string]any{
+			"summary":      summary,
+			"status":       status,
+			"files":        files,
+			"tests_passed": act.TestsPassed,
+			"tests_failed": act.TestsFailed,
+			"confidence":   confidence,
+			"notes":        strings.TrimSpace(act.Notes),
+			"time":         time.Now().UTC().Format(time.RFC3339),
+		}
+
+		a.commit("task_completion", sanitizeName(summary), "", summary)
+		a.bus.Publish("task:completed", report)
+
+		res["ok"] = true
+		res["summary"] = summary
+		res["status"] = status
+		res["files"] = files
+		res["tests_passed"] = act.TestsPassed
+		res["tests_failed"] = act.TestsFailed
+		res["confidence"] = confidence
+		if act.Notes != "" {
+			res["notes"] = act.Notes
+		}
 
 	case "self_update":
 		ctx, cancel := contextWithTimeout(5 * time.Minute)
@@ -731,7 +829,7 @@ func (a *Agent) Execute(act action) string {
 			SourceRoot:     act.SourceRoot,
 			TargetLauncher: act.TargetLauncher,
 			TestPkg:        act.TestPkg,
-			Files:          act.Files,
+			Files:          act.FileMutations,
 		}
 		if act.RunTests != nil {
 			opt.RunTests = *act.RunTests

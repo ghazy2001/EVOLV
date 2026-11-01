@@ -84,6 +84,7 @@ function handle(ev) {
     case 'fs:change': onFsChange(ev.payload || {}, ev.time); blip(520, 0.05, 'sine', 0.03); break;
     case 'evolution': onEvolution(ev.payload || {}); blip(740, 0.06, 'triangle', 0.035); break;
     case 'plan': onPlan(ev.payload || {}); blip(620, 0.05, 'sine', 0.03); break;
+    case 'task:completed': onTaskCompleted(ev.payload || {}); blip(820, 0.07, 'triangle', 0.04); break;
     case 'agent:token': onToken((ev.payload || {}).text || ''); break;
     case 'agent:reasoning': onReasoning((ev.payload || {}).text || ''); break;
     case 'agent:phase': {
@@ -615,18 +616,42 @@ const ACTION_META = {
   list_dir: ['📂', 'list dir'], tree: ['🌲', 'tree'],
   delete_file: ['💥', 'delete'], move: ['📦', 'move'],
   set_project: ['🎯', 'bind project'], reload_shell: ['🔄', 'recompile shell'],
-  set_plan: ['🗺️', 'plan'],
+  set_plan: ['🗺️', 'plan'], complete_task: ['🏁', 'complete task'],
   snapshot: ['🧊', 'freeze genome'], rollback: ['⏪', 'rewind genome'],
   shell: ['❖', 'shell'], self_update: ['🦋', 'self update'],
 };
+function renderCompletionDetails(p) {
+  const status = p.status || 'success';
+  const confidence = p.confidence || 'high';
+  const files = Array.isArray(p.files) ? p.files : [];
+  const passed = Number(p.tests_passed || 0);
+  const failed = Number(p.tests_failed || 0);
+  const meta = [`status: ${escapeHtml(status)}`, `confidence: ${escapeHtml(confidence)}`];
+  if (passed > 0 || failed > 0) meta.push(`tests: ${passed} passed, ${failed} failed`);
+  if (files.length > 0) meta.push(`files: ${files.map((f) => escapeHtml(String(f))).join(', ')}`);
+  const notes = p.notes ? `<div class="tc-report-notes">${escapeHtml(String(p.notes))}</div>` : '';
+  return `<div class="tc-report-body"><div class="tc-report-meta">${meta.join(' · ')}</div>${notes}</div>`;
+}
+function onTaskCompleted(p) {
+  const cards = document.querySelectorAll('.tool-card[data-action="complete_task"]');
+  const card = cards.length ? cards[cards.length - 1] : null;
+  if (card) {
+    const existing = card.querySelector('.tc-report-body');
+    if (existing) existing.remove();
+    card.insertAdjacentHTML('beforeend', renderCompletionDetails(p));
+  }
+  const st = p.status || 'success';
+  toast(`🏁 <b>${escapeHtml(st)}</b> · ${escapeHtml(String(p.summary || 'task completed'))}`);
+}
 function toolCard(act, pending) {
   const [ico, verb] = ACTION_META[act.action] || ['✨', act.action];
-  const target = act.name || act.path || act.to || act.command || '';
+  const target = act.name || act.path || act.to || act.command || act.summary || act.title || '';
   const shortTarget = String(target).length > 64 ? String(target).slice(0, 61) + '…' : target;
+  const extra = act.action === 'complete_task' ? renderCompletionDetails(act) : '';
   return `<div class="tool-card${pending ? ' pending' : ''}" data-action="${escapeHtml(act.action || '')}" data-target="${escapeHtml(String(target))}">`
     + `<div class="tc-line"><span class="tc-dot"></span><span class="tc-verb">${escapeHtml(verb)}</span>`
     + (shortTarget ? `<span class="tc-target">${escapeHtml(shortTarget)}</span>` : '')
-    + `<span class="tc-status">${pending ? '◌' : '✓'}</span></div></div>`;
+    + `<span class="tc-status">${pending ? '◌' : '✓'}</span></div>${extra}</div>`;
 }
 function evolvBlockCards(body) {
   const acts = [];

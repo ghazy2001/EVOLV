@@ -32,9 +32,10 @@ type Agent struct {
 	evolution int // mutation counter
 	maxLoops  int
 
-	lastAct      time.Time // last real user activity (drives dreaming)
-	dreaming     bool
-	lastSnapshot string
+	lastAct          time.Time // last real user activity (drives dreaming)
+	dreaming         bool
+	lastSnapshot     string
+	planActiveInTurn bool // true when set_plan or plan_advance touched the plan in the active task
 }
 
 // New builds an Agent.
@@ -119,13 +120,49 @@ type action struct {
 	Steps          []planStepArg     `json:"steps"`
 	Schema         map[string]string `json:"schema"`
 	Perms          []string          `json:"perms"`
-	Files          []fileMutation    `json:"files,omitempty"`
+	Files          []string          `json:"-"`
+	FileMutations  []fileMutation    `json:"-"`
 	Message        string            `json:"message,omitempty"`
 	RunTests       *bool             `json:"run_tests,omitempty"`
 	StageOnly      bool              `json:"stage_only,omitempty"`
 	SourceRoot     string            `json:"source_root,omitempty"`
 	TargetLauncher string            `json:"target_launcher,omitempty"`
 	TestPkg        string            `json:"test_pkg,omitempty"`
+	Summary        string            `json:"summary"`
+	Status         string            `json:"status"`
+	PlanTitle      string            `json:"plan_title,omitempty"`
+	TestsPassed    int               `json:"tests_passed"`
+	TestsFailed    int               `json:"tests_failed"`
+	Confidence     string            `json:"confidence"`
+	Notes          string            `json:"notes"`
+}
+
+func (a *action) UnmarshalJSON(data []byte) error {
+	type Alias action
+	aux := &struct {
+		RawFiles json.RawMessage `json:"files"`
+		*Alias
+	}{
+		Alias: (*Alias)(a),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	trimmed := strings.TrimSpace(string(aux.RawFiles))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	var paths []string
+	if err := json.Unmarshal(aux.RawFiles, &paths); err == nil {
+		a.Files = paths
+		return nil
+	}
+	var muts []fileMutation
+	if err := json.Unmarshal(aux.RawFiles, &muts); err == nil {
+		a.FileMutations = muts
+		return nil
+	}
+	return fmt.Errorf("invalid files array: expected []string or []{path,content}")
 }
 
 // planStepArg is one step of a set_plan action as it arrives over the wire.
@@ -250,6 +287,7 @@ func (a *Agent) listDir(dir, ext string) ([]string, error) {
 // results back, repeat. Returns the final visible text.
 func (a *Agent) Chat(ctx context.Context, userMsg string) string {
 	a.mu.Lock()
+	a.planActiveInTurn = false
 	isDream := strings.HasPrefix(userMsg, "You are DREAMING")
 	if !isDream {
 		a.lastAct = time.Now()
