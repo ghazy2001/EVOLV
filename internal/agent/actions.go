@@ -844,15 +844,11 @@ func (a *Agent) Execute(act action) string {
 		cmd := exec.CommandContext(ctx, bin, args...)
 		cmd.Dir = cwd
 		out, err := cmd.CombinedOutput()
-		outStr := string(out)
-		if len(outStr) > 8000 {
-			outStr = outStr[:8000] + "\n…(truncated)"
-		}
 		res["ok"] = err == nil
 		res["cwd"] = cwd
-		res["output"] = redact.Redact(outStr)
+		res["output"] = formatShellOutput(out)
 		if err != nil {
-			res["error"] = err.Error()
+			res["error"] = redact.Redact(err.Error())
 		}
 
 	default:
@@ -860,8 +856,17 @@ func (a *Agent) Execute(act action) string {
 		res["error"] = "unknown action: " + act.Action
 	}
 
+	res = redact.RedactMap(res)
 	raw, _ := json.Marshal(res)
 	return "kernel:" + string(raw)
+}
+
+func formatShellOutput(out []byte) string {
+	outStr := redact.Redact(string(out))
+	if len(outStr) > 8000 {
+		outStr = outStr[:8000] + "\n…(truncated)"
+	}
+	return outStr
 }
 
 func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
@@ -876,6 +881,7 @@ func (a *Agent) commit(kind, name, path, desc string) {
 	a.evolution++
 	desc = redact.Redact(desc)
 	name = redact.Redact(name)
+	path = redact.Redact(path)
 	entry := map[string]any{
 		"n": a.evolution, "kind": kind, "name": name, "path": path, "description": desc,
 	}
