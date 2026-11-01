@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/dxn111/EVOLV/internal/redact"
 )
 
 // Layout of the organism on disk.
@@ -296,8 +298,9 @@ func (w *W) SaveConfig() {
 	}
 }
 
-// AppendEvolution records every mutation in evolution.jsonl.
+// AppendEvolution records every mutation in evolution.jsonl with credentials redacted.
 func (w *W) AppendEvolution(entry map[string]any) {
+	entry = redact.RedactMap(entry)
 	entry["time"] = time.Now().UTC().Format(time.RFC3339)
 	raw, err := json.Marshal(entry)
 	if err != nil {

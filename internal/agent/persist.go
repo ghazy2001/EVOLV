@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/dxn111/EVOLV/internal/providers"
+	"github.com/dxn111/EVOLV/internal/redact"
 	"github.com/dxn111/EVOLV/internal/workspace"
 )
 
@@ -19,6 +20,7 @@ func (a *Agent) memoryFile() string {
 }
 
 // saveMemory writes the current history to disk (bounded, same trim as RAM).
+// Credentials and API keys are redacted before writing to disk.
 func (a *Agent) saveMemory() {
 	a.mu.Lock()
 	hist := a.history
@@ -27,7 +29,14 @@ func (a *Agent) saveMemory() {
 		_ = os.Remove(a.memoryFile())
 		return
 	}
-	raw, err := json.Marshal(hist)
+	safe := make([]providers.Message, len(hist))
+	for i, m := range hist {
+		safe[i] = providers.Message{
+			Role:    m.Role,
+			Content: redact.Redact(m.Content),
+		}
+	}
+	raw, err := json.Marshal(safe)
 	if err != nil {
 		return
 	}

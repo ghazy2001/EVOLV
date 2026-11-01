@@ -59,3 +59,32 @@ func TestChatPersistsMemory(t *testing.T) {
 		t.Fatal("user message missing from persisted memory")
 	}
 }
+
+// TestMemoryRedactsCredentials verifies credentials are never persisted to disk in conversation.json
+func TestMemoryRedactsCredentials(t *testing.T) {
+	a, _ := mockAgent(t)
+	a.history = []providers.Message{
+		{Role: "user", Content: "my api key is sk-1234567890abcdef12345678 and token is ghp_1234567890abcdef1234567890abcdef12"},
+		{Role: "assistant", Content: "I will use Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret"},
+	}
+	a.saveMemory()
+
+	raw, err := os.ReadFile(a.memoryFile())
+	if err != nil {
+		t.Fatalf("memory file not written: %v", err)
+	}
+	saved := string(raw)
+
+	if strings.Contains(saved, "sk-1234567890abcdef12345678") {
+		t.Fatalf("OpenAI key leaked to conversation.json: %s", saved)
+	}
+	if strings.Contains(saved, "ghp_1234567890abcdef1234567890abcdef12") {
+		t.Fatalf("GitHub PAT leaked to conversation.json: %s", saved)
+	}
+	if strings.Contains(saved, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret") {
+		t.Fatalf("JWT bearer token leaked to conversation.json: %s", saved)
+	}
+	if !strings.Contains(saved, "[REDACTED]") {
+		t.Fatalf("expected [REDACTED] in saved memory: %s", saved)
+	}
+}
