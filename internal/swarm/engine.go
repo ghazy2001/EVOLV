@@ -185,6 +185,18 @@ func buildAgents(size int) []AgentState {
 	return agents
 }
 
+// ArtifactByName returns a clone of the artifact matching name, if any.
+func (e *Engine) ArtifactByName(name string) (Artifact, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, a := range e.state.Artifacts {
+		if a.Name == name {
+			return a, true
+		}
+	}
+	return Artifact{}, false
+}
+
 // Snapshot returns a copy safe to serialize while a run is mutating state.
 func (e *Engine) Snapshot() State {
 	e.mu.Lock()
@@ -1096,3 +1108,69 @@ func clip(s string, n int) string {
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339) }
+
+// ExtractCode isolates clean code from markdown code fences (e.g. ```html ... ```)
+// or returns the original content if no fences exist.
+func ExtractCode(content, target string) string {
+	content = strings.TrimSpace(content)
+	if !strings.Contains(content, "```") {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	var inFence bool
+	var fenceLang string
+	var current strings.Builder
+	type block struct {
+		lang string
+		code string
+	}
+	var blocks []block
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if inFence {
+				blocks = append(blocks, block{lang: fenceLang, code: strings.TrimSpace(current.String())})
+				current.Reset()
+				inFence = false
+				fenceLang = ""
+			} else {
+				inFence = true
+				fenceLang = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "```")))
+			}
+			continue
+		}
+		if inFence {
+			current.WriteString(line)
+			current.WriteByte('\n')
+		}
+	}
+
+	if len(blocks) == 0 {
+		return content
+	}
+
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target == "component" || target == "organ" {
+		for _, b := range blocks {
+			if b.lang == "html" || b.lang == "htm" {
+				return b.code
+			}
+		}
+	}
+	if target == "tool" {
+		for _, b := range blocks {
+			if b.lang == "js" || b.lang == "javascript" {
+				return b.code
+			}
+		}
+	}
+
+	best := blocks[0]
+	for _, b := range blocks[1:] {
+		if len(b.code) > len(best.code) {
+			best = b
+		}
+	}
+	return best.code
+}

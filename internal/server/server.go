@@ -103,6 +103,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/swarm/vote", s.handleSwarmVote)
 	s.mux.HandleFunc("/api/swarm/runs", s.handleSwarmRuns)
 	s.mux.HandleFunc("/api/swarm/history", s.handleSwarmHistory)
+	s.mux.HandleFunc("/api/swarm/apply", s.handleSwarmApply)
 	s.mux.HandleFunc("/api/history", s.handleHistory)
 	s.mux.HandleFunc("/api/settings", s.handleSettings)
 	s.mux.HandleFunc("/api/models", s.handleModels)
@@ -622,6 +623,344 @@ func (s *Server) handleSwarmStop(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+func sanitizeSafeName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else if b.Len() > 0 && b.String()[b.Len()-1] != '-' {
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 40 {
+		out = out[:40]
+	}
+	return out
+}
+
+func (s *Server) handleSwarmApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Artifact string `json:"artifact"`
+		Content  string `json:"content"`
+		Target   string `json:"target"` // component | organ | tool | skill | project | file
+		Name     string `json:"name"`
+		Path     string `json:"path"`
+		Desc     string `json:"desc"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	content := in.Content
+	if content == "" {
+		if in.Artifact == "" {
+			writeJSONError(w, http.StatusBadRequest, "artifact name or content is required")
+			return
+		}
+		if s.swarm == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "swarm runtime unavailable")
+			return
+		}
+		art, found := s.swarm.ArtifactByName(in.Artifact)
+		if !found {
+			for _, a := range s.swarm.Snapshot().Artifacts {
+				if a.Name == in.Artifact {
+					art = a
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			writeJSONError(w, http.StatusNotFound, "artifact not found in swarm")
+			return
+		}
+		content = art.Content
+	}
+	if strings.TrimSpace(content) == "" {
+		writeJSONError(w, http.StatusBadRequest, "artifact content is empty")
+		return
+	}
+
+	target := strings.ToLower(strings.TrimSpace(in.Target))
+	if target == "" {
+		target = "component"
+	}
+
+	cleanCode := swarm.ExtractCode(content, target)
+	name := strings.TrimSpace(in.Name)
+	if name == "" && in.Artifact != "" {
+		name = in.Artifact
+	}
+
+	switch target {
+	case "component", "organ":
+		base := sanitizeSafeName(strings.TrimSuffix(name, filepath.Ext(name)))
+		if base == "" {
+			base = "swarm-organ"
+		}
+		fileName := base + ".html"
+		destPath := filepath.Join(s.ws.Dir(workspace.ComponentsDir), fileName)
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := os.WriteFile(destPath, []byte(cleanCode), 0o644); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		desc := strings.TrimSpace(in.Desc)
+		if desc == "" {
+			desc = "Swarm organ mounted to canvas"
+		}
+		rel := "workspace/ui/components/" + fileName
+		s.ws.AppendEvolution(map[string]any{
+			"kind":        "component",
+			"name":        base,
+			"path":        rel,
+			"description": desc,
+			"source":      "swarm",
+		})
+		if s.bus != nil {
+			s.bus.Publish("fs:change", map[string]string{
+				"path":   rel,
+				"zone":   "components",
+				"kind":   "write",
+				"source": "swarm",
+			})
+			s.bus.Publish("evolution", map[string]any{
+				"kind":        "component",
+				"name":        base,
+				"path":        rel,
+				"description": desc,
+				"source":      "swarm",
+			})
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":      true,
+			"target":  "component",
+			"name":    base,
+			"path":    rel,
+			"bytes":   len(cleanCode),
+			"message": "Component mounted to canvas",
+		})
+
+	case "tool":
+		base := sanitizeSafeName(strings.TrimSuffix(name, filepath.Ext(name)))
+		if base == "" {
+			base = "swarm-tool"
+		}
+		fileName := base + ".js"
+		destPath := filepath.Join(s.ws.Dir(workspace.ToolsDir), fileName)
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := os.WriteFile(destPath, []byte(cleanCode), 0o644); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		desc := strings.TrimSpace(in.Desc)
+		if desc == "" {
+			desc = "Swarm tool evolved"
+		}
+		rel := "workspace/tools/" + fileName
+		s.ws.AppendEvolution(map[string]any{
+			"kind":        "tool",
+			"name":        base,
+			"path":        rel,
+			"description": desc,
+			"source":      "swarm",
+		})
+		if s.ag != nil {
+			s.ag.ReloadGrownCode()
+		}
+		if s.bus != nil {
+			s.bus.Publish("fs:change", map[string]string{
+				"path":   rel,
+				"zone":   "tools",
+				"kind":   "write",
+				"source": "swarm",
+			})
+			s.bus.Publish("evolution", map[string]any{
+				"kind":        "tool",
+				"name":        base,
+				"path":        rel,
+				"description": desc,
+				"source":      "swarm",
+			})
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":      true,
+			"target":  "tool",
+			"name":    base,
+			"path":    rel,
+			"bytes":   len(cleanCode),
+			"message": "Tool compiled into sandbox",
+		})
+
+	case "skill":
+		base := sanitizeSafeName(strings.TrimSuffix(name, filepath.Ext(name)))
+		if base == "" {
+			base = "swarm-skill"
+		}
+		fileName := base + ".md"
+		destPath := filepath.Join(s.ws.Dir(workspace.SkillsDir), fileName)
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := os.WriteFile(destPath, []byte(cleanCode), 0o644); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		desc := strings.TrimSpace(in.Desc)
+		if desc == "" {
+			desc = "Swarm skill learned"
+		}
+		rel := "workspace/skills/" + fileName
+		s.ws.AppendEvolution(map[string]any{
+			"kind":        "skill",
+			"name":        base,
+			"path":        rel,
+			"description": desc,
+			"source":      "swarm",
+		})
+		if s.bus != nil {
+			s.bus.Publish("fs:change", map[string]string{
+				"path":   rel,
+				"zone":   "skills",
+				"kind":   "write",
+				"source": "swarm",
+			})
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":      true,
+			"target":  "skill",
+			"name":    base,
+			"path":    rel,
+			"bytes":   len(cleanCode),
+			"message": "Skill added to organism",
+		})
+
+	case "project":
+		projRoot := ""
+		if s.ws != nil && s.ws.Config != nil {
+			projRoot = strings.TrimSpace(s.ws.Config.ProjectDir)
+		}
+		if projRoot == "" {
+			writeJSONError(w, http.StatusBadRequest, "no project bound to workspace")
+			return
+		}
+		targetPath := strings.TrimSpace(in.Path)
+		if targetPath == "" {
+			targetPath = name
+		}
+		targetPath = strings.TrimSpace(targetPath)
+		if strings.HasPrefix(targetPath, "/") || strings.HasPrefix(targetPath, "\\") || filepath.IsAbs(targetPath) {
+			writeJSONError(w, http.StatusBadRequest, "path must be relative to project root")
+			return
+		}
+		cleanRel := filepath.Clean(filepath.FromSlash(targetPath))
+		if cleanRel == "." || cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) {
+			writeJSONError(w, http.StatusBadRequest, "path escapes project root")
+			return
+		}
+		destPath := filepath.Join(projRoot, cleanRel)
+		cleanProj := filepath.Clean(projRoot)
+		relCheck, err := filepath.Rel(cleanProj, destPath)
+		if err != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(filepath.Separator)) {
+			writeJSONError(w, http.StatusBadRequest, "path escapes project root")
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := os.WriteFile(destPath, []byte(cleanCode), 0o644); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if s.bus != nil {
+			s.bus.Publish("fs:change", map[string]string{
+				"path":   filepath.ToSlash(cleanRel),
+				"op":     "write",
+				"source": "swarm",
+			})
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":      true,
+			"target":  "project",
+			"name":    filepath.Base(destPath),
+			"path":    filepath.ToSlash(cleanRel),
+			"bytes":   len(cleanCode),
+			"message": "File written to project",
+		})
+
+	case "file":
+		targetPath := strings.TrimSpace(in.Path)
+		if targetPath == "" {
+			targetPath = name
+		}
+		targetPath = strings.TrimSpace(targetPath)
+		if strings.HasPrefix(targetPath, "/") || strings.HasPrefix(targetPath, "\\") || filepath.IsAbs(targetPath) {
+			writeJSONError(w, http.StatusBadRequest, "path must be relative to workspace")
+			return
+		}
+		cleanRel := filepath.Clean(filepath.FromSlash(targetPath))
+		if cleanRel == "." || cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) {
+			writeJSONError(w, http.StatusBadRequest, "path escapes workspace")
+			return
+		}
+		wsRoot := s.ws.Dir(workspace.WorkspaceDir)
+		destPath := filepath.Join(wsRoot, cleanRel)
+		cleanWS := filepath.Clean(wsRoot)
+		relCheck, err := filepath.Rel(cleanWS, destPath)
+		if err != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(filepath.Separator)) {
+			writeJSONError(w, http.StatusBadRequest, "path escapes workspace")
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := os.WriteFile(destPath, []byte(cleanCode), 0o644); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		rel := filepath.ToSlash(filepath.Join("workspace", cleanRel))
+		if s.bus != nil {
+			s.bus.Publish("fs:change", map[string]string{
+				"path":   rel,
+				"op":     "write",
+				"source": "swarm",
+			})
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":      true,
+			"target":  "file",
+			"name":    filepath.Base(destPath),
+			"path":    rel,
+			"bytes":   len(cleanCode),
+			"message": "File written to workspace",
+		})
+
+	default:
+		writeJSONError(w, http.StatusBadRequest, "unknown apply target: "+target)
+	}
 }
 
 func (s *Server) agentFor(id string) *agent.Agent {

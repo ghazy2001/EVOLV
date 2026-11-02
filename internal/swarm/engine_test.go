@@ -269,3 +269,40 @@ func TestSteerRequiresRunningSwarm(t *testing.T) {
 		t.Fatal("vote accepted while idle")
 	}
 }
+
+func TestArtifactByName(t *testing.T) {
+	e := New(nil, nil)
+	e.addArtifact("timer.html", "code", "<div>timer</div>")
+	art, found := e.ArtifactByName("timer.html")
+	if !found || art.Content != "<div>timer</div>" {
+		t.Fatalf("expected timer.html artifact, got %+v (found=%v)", art, found)
+	}
+	if _, found := e.ArtifactByName("missing.txt"); found {
+		t.Fatal("expected missing.txt to not be found")
+	}
+}
+
+func TestExtractCode(t *testing.T) {
+	rawHTML := "<div>hello</div>"
+	if got := ExtractCode(rawHTML, "component"); got != rawHTML {
+		t.Fatalf("got %q, want %q", got, rawHTML)
+	}
+
+	markdownWithHTML := "Here is the component:\n```html\n<section class=\"box\">\n  <p>test</p>\n</section>\n```\nEnjoy!"
+	wantHTML := "<section class=\"box\">\n  <p>test</p>\n</section>"
+	if got := ExtractCode(markdownWithHTML, "component"); got != wantHTML {
+		t.Fatalf("got %q, want %q", got, wantHTML)
+	}
+
+	markdownWithJS := "Tool:\n```js\nevolv.log('hello');\n```"
+	wantJS := "evolv.log('hello');"
+	if got := ExtractCode(markdownWithJS, "tool"); got != wantJS {
+		t.Fatalf("got %q, want %q", got, wantJS)
+	}
+
+	genericMarkdown := "Multi blocks:\n```\nshort\n```\n```\nlonger block of text here\n```"
+	wantGeneric := "longer block of text here"
+	if got := ExtractCode(genericMarkdown, "file"); got != wantGeneric {
+		t.Fatalf("got %q, want %q", got, wantGeneric)
+	}
+}

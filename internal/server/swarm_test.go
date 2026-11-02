@@ -196,3 +196,108 @@ func TestSwarmSteerEndpoint(t *testing.T) {
 		t.Fatal("human steer not persisted in transcript")
 	}
 }
+
+func TestSwarmApplyComponent(t *testing.T) {
+	s, _ := newWbServer(t)
+
+	// Start a swarm run and let it produce artifacts
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/swarm", strings.NewReader(`{"mission":"build a focus timer","agents":5}`))
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("start -> %d", rec.Code)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && s.swarm.Snapshot().Status == "running" {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if s.swarm.Snapshot().Status != "done" {
+		t.Fatalf("swarm run did not complete: %s", s.swarm.Snapshot().Status)
+	}
+
+	artifacts := s.swarm.Snapshot().Artifacts
+	if len(artifacts) == 0 {
+		t.Fatal("no artifacts produced by swarm run")
+	}
+
+	// Apply the first artifact as a component
+	art := artifacts[0]
+	applyReq := httptest.NewRequest(http.MethodPost, "/api/swarm/apply", strings.NewReader(`{"artifact":"`+art.Name+`","target":"component","name":"focus-timer"}`))
+	applyRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(applyRec, applyReq)
+
+	if applyRec.Code != http.StatusOK {
+		t.Fatalf("apply component -> %d: %s", applyRec.Code, applyRec.Body.String())
+	}
+
+	var res map[string]any
+	if err := json.Unmarshal(applyRec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res["ok"] != true || res["name"] != "focus-timer" {
+		t.Fatalf("unexpected res: %v", res)
+	}
+
+	dest := filepath.Join(s.ws.Dir("workspace/ui/components"), "focus-timer.html")
+	content, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("component file not written: %v", err)
+	}
+	if len(content) == 0 {
+		t.Fatal("component file is empty")
+	}
+
+	// Verify evolution was logged
+	evolutions := s.ws.ReadEvolution(10)
+	foundEvo := false
+	for _, e := range evolutions {
+		if e["kind"] == "component" && e["name"] == "focus-timer" && e["source"] == "swarm" {
+			foundEvo = true
+			break
+		}
+	}
+	if !foundEvo {
+		t.Fatal("evolution entry for component not found in ledger")
+	}
+}
+
+func TestSwarmApplyProjectAndSecurity(t *testing.T) {
+	s, proj := newWbServer(t)
+
+	// Direct content application as a project file
+	applyReq := httptest.NewRequest(http.MethodPost, "/api/swarm/apply", strings.NewReader(`{"content":"package main\n\nfunc main() {}","target":"project","path":"sub/main.go"}`))
+	applyRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(applyRec, applyReq)
+
+	if applyRec.Code != http.StatusOK {
+		t.Fatalf("apply project -> %d: %s", applyRec.Code, applyRec.Body.String())
+	}
+
+	written, err := os.ReadFile(filepath.Join(proj, "sub", "main.go"))
+	if err != nil {
+		t.Fatalf("project file not written: %v", err)
+	}
+	if !strings.Contains(string(written), "package main") {
+		t.Fatalf("unexpected content: %s", string(written))
+	}
+
+	// Security: path escape attempts must be rejected
+	badPaths := []string{"../escape.txt", "../../evil.sh", "/abs/path.txt", `..\windows\bad.txt`}
+	for _, p := range badPaths {
+		badReq := httptest.NewRequest(http.MethodPost, "/api/swarm/apply", strings.NewReader(`{"content":"evil","target":"project","path":"`+p+`"}`))
+		badRec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(badRec, badReq)
+		if badRec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for path %q, got %d", p, badRec.Code)
+		}
+	}
+
+	// Nonexistent artifact should return 404
+	missingReq := httptest.NewRequest(http.MethodPost, "/api/swarm/apply", strings.NewReader(`{"artifact":"does-not-exist.txt","target":"component"}`))
+	missingRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing artifact, got %d", missingRec.Code)
+	}
+}

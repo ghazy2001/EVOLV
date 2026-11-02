@@ -251,6 +251,35 @@
     margin: 0; padding: 12px; max-height: 300px; overflow: auto;
     background: #22211e; color: #e8e3d9; font: 10.5px/1.6 var(--mono); white-space: pre-wrap;
   }
+  .artifact-actions {
+    display: flex; gap: 6px; padding: 7px 10px; background: var(--bg); border-top: 1px solid var(--line);
+    justify-content: flex-end; align-items: center;
+  }
+  .artifact-btn {
+    background: transparent; border: 1px solid var(--line); color: var(--soft);
+    border-radius: 6px; padding: 3px 8px; font-size: 10px; font-weight: 500; cursor: pointer;
+    font-family: inherit; transition: all .15s ease;
+  }
+  .artifact-btn:hover { background: var(--panel); color: var(--fg); }
+  .artifact-btn.primary {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .artifact-btn.primary:hover { opacity: .9; }
+  .artifact-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  #toasts {
+    position: fixed; bottom: 24px; right: 24px; z-index: 100;
+    display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+  }
+  .toast {
+    pointer-events: auto; background: #262421; border: 1px solid var(--line);
+    border-left: 3px solid var(--accent); color: var(--fg); font-size: 12px;
+    padding: 9px 14px; border-radius: 8px; max-width: 380px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35); animation: fade .2s ease;
+  }
+  .toast.out { opacity: 0; transform: translateX(20px); transition: all .35s; }
+  .toast b { font-weight: 600; color: #fff; }
+  .toast a { color: var(--accent); }
 
   @keyframes blink { 50% { opacity: .3; } }
   @keyframes fade { from { opacity: 0; transform: translateY(4px); } }
@@ -428,6 +457,22 @@
       .replace(/^\s*```[a-zA-Z0-9_-]*\s*$/gm, '')
       .replace(/^\s*```\s*$/gm, '')
       .trim();
+  }
+
+  function toast(msg, ms = 4000) {
+    let host = $('#toasts');
+    if (!host) {
+      host = el('div', null);
+      host.id = 'toasts';
+      document.body.appendChild(host);
+    }
+    const t = el('div', 'toast');
+    t.innerHTML = msg;
+    host.appendChild(t);
+    setTimeout(() => {
+      t.classList.add('out');
+      setTimeout(() => t.remove(), 450);
+    }, ms);
   }
 
   function setWS(on) {
@@ -660,11 +705,95 @@
     }
     for (const a of artifacts) {
       const details = el('details', 'artifact');
+      details.open = artifacts.length <= 3;
       const summary = el('summary');
       summary.append(el('span', null, a.name));
       summary.append(el('small', null, a.kind || 'artifact'));
       const pre = el('pre', null, a.content || '');
-      details.append(summary, pre);
+
+      const actions = el('div', 'artifact-actions');
+      const copyBtn = el('button', 'artifact-btn', 'copy');
+      copyBtn.type = 'button';
+      copyBtn.onclick = (e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(a.content || '').then(() => {
+          copyBtn.textContent = 'copied!';
+          setTimeout(() => { copyBtn.textContent = 'copy'; }, 1600);
+        });
+      };
+      actions.append(copyBtn);
+
+      const content = a.content || '';
+      const isHTML = content.includes('<') && content.includes('>');
+      const isCode = a.kind === 'code' || a.kind === 'revision' || isHTML;
+
+      if (isCode) {
+        const mountBtn = el('button', 'artifact-btn primary', 'mount on canvas');
+        mountBtn.type = 'button';
+        mountBtn.title = 'Mount this code directly as an organ on the EVOLV canvas';
+        mountBtn.onclick = async (e) => {
+          e.stopPropagation();
+          mountBtn.disabled = true;
+          mountBtn.textContent = 'mounting…';
+          try {
+            const res = await fetch('/api/swarm/apply', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ artifact: a.name, target: 'component' })
+            });
+            const data = await res.json();
+            if (res.ok && data.ok) {
+              mountBtn.textContent = 'mounted!';
+              toast(`🧩 <b>${data.name}</b> mounted on canvas · <a href="/">view canvas</a>`, 6000);
+              setTimeout(() => { mountBtn.textContent = 'mount on canvas'; mountBtn.disabled = false; }, 3000);
+            } else {
+              mountBtn.textContent = 'failed';
+              toast(`⚠️ ${data.error || 'Failed to mount component'}`);
+              setTimeout(() => { mountBtn.textContent = 'mount on canvas'; mountBtn.disabled = false; }, 2500);
+            }
+          } catch (err) {
+            mountBtn.textContent = 'error';
+            toast(`⚠️ ${err.message}`);
+            setTimeout(() => { mountBtn.textContent = 'mount on canvas'; mountBtn.disabled = false; }, 2500);
+          }
+        };
+        actions.append(mountBtn);
+      }
+
+      const saveBtn = el('button', 'artifact-btn', 'save as file');
+      saveBtn.type = 'button';
+      saveBtn.title = 'Save this artifact into the bound project or workspace';
+      saveBtn.onclick = async (e) => {
+        e.stopPropagation();
+        const dest = prompt('Save path (relative to project or workspace):', a.name.replace(/[^a-zA-Z0-9_.-]/g, '-'));
+        if (!dest) return;
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'saving…';
+        try {
+          const res = await fetch('/api/swarm/apply', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ artifact: a.name, target: 'project', path: dest })
+          });
+          const data = await res.json();
+          if (res.ok && data.ok) {
+            saveBtn.textContent = 'saved!';
+            toast(`💾 Saved to project: <b>${data.path}</b>`, 4500);
+            setTimeout(() => { saveBtn.textContent = 'save as file'; saveBtn.disabled = false; }, 2500);
+          } else {
+            saveBtn.textContent = 'failed';
+            toast(`⚠️ ${data.error || 'Failed to save file'}`);
+            setTimeout(() => { saveBtn.textContent = 'save as file'; saveBtn.disabled = false; }, 2500);
+          }
+        } catch (err) {
+          saveBtn.textContent = 'error';
+          toast(`⚠️ ${err.message}`);
+          setTimeout(() => { saveBtn.textContent = 'save as file'; saveBtn.disabled = false; }, 2500);
+        }
+      };
+      actions.append(saveBtn);
+
+      details.append(summary, pre, actions);
       artifactsEl.append(details);
     }
   }
