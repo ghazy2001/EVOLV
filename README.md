@@ -336,6 +336,7 @@ Downloads are **SHA-256 verified against the release's `checksums.txt`** before 
 EVOLV is a self-modifying agent running on **your** machine — that's the entire point, and it comes with real teeth:
 
 - The agent can run **shell commands** and read/write **any file on the machine** — that's what makes it a real workspace, not a toy. It binds to `127.0.0.1`, and the browser UI only exposes what the kernel serves.
+- Evolved components and tools are **security-linted before mounting**: external script injection, remote exfiltration calls, cookie access, and dangerous URI schemes are automatically detected and blocked to ensure components remain strictly local and safe.
 - Free anonymous models may route through providers that log prompts — **don't paste secrets into demo-tier chats.**
 - `evolv --reset` restores the factory genome if an evolution goes feral.
 
@@ -432,7 +433,7 @@ make cross     # verify every release target still builds
 
 CI (`.github/workflows/ci.yml`) runs formatting, tidy/docs checks, tests + coverage, a real-server boot/SIGTERM smoke, the full-module race detector, Go version compatibility, and cross-builds Linux/macOS/Windows on every push and pull request. Releases are validated with the latest patched Go 1.26.x, smoke-tested, checksummed and provenance-attested before the binaries are published.
 
-Ideas that would be amazing: new protocol actions, a genome inspector UI, evolution replay/branching, security linting for evolved components, ports to new platforms. Open an issue or ping me directly — **I answer everything.**
+Ideas that would be amazing: new protocol actions, a genome inspector UI, evolution replay/branching, ports to new platforms. Open an issue or ping me directly — **I answer everything.**
 
 ## Support & ideas
 

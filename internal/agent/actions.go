@@ -17,6 +17,7 @@ import (
 	"github.com/dop251/goja"
 
 	"github.com/dxn111/EVOLV/internal/candidate"
+	"github.com/dxn111/EVOLV/internal/lint"
 	"github.com/dxn111/EVOLV/internal/redact"
 	"github.com/dxn111/EVOLV/internal/update"
 	"github.com/dxn111/EVOLV/internal/workspace"
@@ -283,6 +284,22 @@ func (a *Agent) Execute(act action) string {
 			res["error"] = "evolve_component needs name + html"
 			break
 		}
+		// Security linting for evolved components
+		lintRep := lint.LintComponent(name, act.HTML)
+		if !lintRep.Valid && !act.Force {
+			res["ok"] = false
+			res["error"] = fmt.Sprintf("security lint failed: %s; components must remain self-contained (pass force:true to override)", lintRep.Summary())
+			res["security"] = lintRep
+			if a.bus != nil {
+				a.bus.Publish("security:lint", map[string]any{
+					"target":      name,
+					"target_type": "component",
+					"status":      "blocked",
+					"report":      lintRep,
+				})
+			}
+			break
+		}
 		path := filepath.Join(a.ws.Dir(workspace.ComponentsDir), name+".html")
 		hash, changed, err := guardedWrite(path, []byte(act.HTML), act.ExpectedHash)
 		if err != nil {
@@ -296,6 +313,32 @@ func (a *Agent) Execute(act action) string {
 		res["hash"], res["changed"] = hash, changed
 		res["path"] = "workspace/ui/components/" + name + ".html"
 		res["note"] = "component hot-mounted live"
+		if len(lintRep.Findings) > 0 {
+			res["security"] = lintRep
+		}
+
+	case "lint_component", "lint_code":
+		targetType := act.TargetType
+		if targetType == "" {
+			targetType = "component"
+		}
+		name := sanitizeName(act.Name)
+		content := act.Content
+		if content == "" {
+			content = act.HTML
+		}
+		if content == "" {
+			content = act.Code
+		}
+		if content == "" {
+			res["ok"], res["error"] = false, "lint requires content, html, or code"
+			break
+		}
+		rep := lint.Lint(targetType, name, content)
+		res["ok"] = true
+		res["valid"] = rep.Valid
+		res["summary"] = rep.Summary()
+		res["report"] = rep
 
 	case "remove_component":
 		name := sanitizeName(act.Name)

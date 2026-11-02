@@ -246,6 +246,9 @@ type action struct {
 	SourceRoot     string            `json:"source_root,omitempty"`
 	TargetLauncher string            `json:"target_launcher,omitempty"`
 	TestPkg        string            `json:"test_pkg,omitempty"`
+	TargetType     string            `json:"target_type,omitempty"`
+	Force          bool              `json:"force,omitempty"`
+	Strict         bool              `json:"strict,omitempty"`
 }
 
 func (a *Agent) candidateManager() *candidate.Manager {

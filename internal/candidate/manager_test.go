@@ -89,3 +89,24 @@ func TestPromotionRollsBackWhenLiveValidationFails(t *testing.T) {
 		t.Fatalf("rollback did not restore main.go: %s", live)
 	}
 }
+
+func TestCandidateRejectsPathEscape(t *testing.T) {
+	mgr, _ := testManager(t)
+	escapes := []string{
+		"/abs/path.go",
+		"\\abs\\path.go",
+		"../escape.go",
+		"..\\escape.go",
+		".",
+		"..",
+	}
+	for _, esc := range escapes {
+		_, err := mgr.Stage(context.Background(), Proposal{
+			Name:  "escape",
+			Files: map[string]string{esc: "package main"},
+		})
+		if err == nil {
+			t.Fatalf("expected path %q to be rejected as escaping source root", esc)
+		}
+	}
+}

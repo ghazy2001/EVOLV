@@ -248,3 +248,68 @@ func TestFormatShellOutputRedactsBeforeTruncation(t *testing.T) {
 		t.Fatalf("expected [REDACTED] in shell output")
 	}
 }
+
+func TestEvolveComponentSecurityLint(t *testing.T) {
+	a := testAgent(t)
+
+	// Insecure component with external CDN script
+	insecureAct := action{
+		Action: "evolve_component",
+		Name:   "insecure_widget",
+		HTML:   `<div id="test"></div><script src="https://cdn.jsdelivr.net/vue.js"></script>`,
+	}
+	res := execOK(t, a, insecureAct)
+	if res["ok"] == true {
+		t.Fatal("expected insecure component evolution to be blocked")
+	}
+	if !strings.Contains(res["error"].(string), "security lint failed") {
+		t.Fatalf("expected error message to mention security lint failure, got: %v", res["error"])
+	}
+
+	// Force override allows write with security report attached
+	forcedAct := action{
+		Action: "evolve_component",
+		Name:   "insecure_widget",
+		HTML:   `<div id="test"></div><script src="https://cdn.jsdelivr.net/vue.js"></script>`,
+		Force:  true,
+	}
+	resForced := execOK(t, a, forcedAct)
+	if resForced["ok"] != true {
+		t.Fatalf("expected forced component write to succeed, got: %v", resForced)
+	}
+	if resForced["security"] == nil {
+		t.Fatal("expected security report in forced result")
+	}
+
+	// Clean component succeeds without force
+	cleanAct := action{
+		Action: "evolve_component",
+		Name:   "clean_widget",
+		HTML:   `<div id="test"><h3>Clean</h3></div><script>fetch('/api/creations');</script>`,
+	}
+	resClean := execOK(t, a, cleanAct)
+	if resClean["ok"] != true {
+		t.Fatalf("expected clean component write to succeed, got: %v", resClean)
+	}
+}
+
+func TestLintAction(t *testing.T) {
+	a := testAgent(t)
+
+	act := action{
+		Action:     "lint_component",
+		Name:       "eval_widget",
+		TargetType: "component",
+		HTML:       `<div></div><script>document.cookie = 'x=1';</script>`,
+	}
+	res := execOK(t, a, act)
+	if res["ok"] != true {
+		t.Fatalf("lint action failed: %v", res)
+	}
+	if res["valid"] == true {
+		t.Fatal("expected cookie stealer to be invalid")
+	}
+	if !strings.Contains(res["summary"].(string), "security errors") {
+		t.Fatalf("expected summary to mention security errors, got: %v", res["summary"])
+	}
+}

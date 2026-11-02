@@ -56,7 +56,7 @@ type Manager struct {
 func hash(raw []byte) string { return fmt.Sprintf("sha256:%x", sha256.Sum256(raw)) }
 func cleanRel(p string) (string, error) {
 	p = filepath.Clean(filepath.FromSlash(p))
-	if p == "." || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
+	if p == "." || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\") {
 		return "", fmt.Errorf("candidate path escapes source: %q", p)
 	}
 	return p, nil
