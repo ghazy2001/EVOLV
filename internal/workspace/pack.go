@@ -82,8 +82,8 @@ const (
 
 // secretPatterns catches common token shapes to prevent accidental credential leakage.
 var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)sk-[a-zA-Z0-9_-]{20,}`),
-	regexp.MustCompile(`(?i)sk-ant-[a-zA-Z0-9_-]{20,}`),
+	regexp.MustCompile(`(?i)\bsk-[a-zA-Z0-9_-]{20,}`),
+	regexp.MustCompile(`(?i)\bsk-ant-[a-zA-Z0-9_-]{20,}`),
 	regexp.MustCompile(`(?i)(?:gh[pousr]_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9_]{20,})`),
 	regexp.MustCompile(`(?i)AKIA[0-9A-Z]{16}`),
 }
@@ -538,6 +538,9 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 		if pluginName, ok := extractPluginName(path); ok {
 			if _, checked := existingPluginDirs[pluginName]; !checked {
 				_, statErr := root.Lstat(filepath.FromSlash("workspace/plugins/" + pluginName))
+				if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+					return nil, fmt.Errorf("inspecting plugin dir %s: %w", pluginName, statErr)
+				}
 				existingPluginDirs[pluginName] = statErr == nil
 			}
 		}
@@ -581,7 +584,13 @@ func (w *W) Import(in io.Reader, opts ImportOptions) (*ImportReport, error) {
 
 		osRel := filepath.FromSlash(path)
 		info, statErr := root.Stat(osRel)
-		exists := statErr == nil && !info.IsDir()
+		if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+			return nil, fmt.Errorf("inspecting existing %s: %w", path, statErr)
+		}
+		if statErr == nil && info.IsDir() {
+			return nil, fmt.Errorf("destination %s is a directory", path)
+		}
+		exists := statErr == nil
 		identical := false
 		action := "create"
 

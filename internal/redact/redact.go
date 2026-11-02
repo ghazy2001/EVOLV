@@ -3,6 +3,7 @@
 package redact
 
 import (
+	"encoding/json"
 	"reflect"
 	"regexp"
 	"strings"
@@ -34,7 +35,7 @@ var (
 	reStandaloneBasic  = regexp.MustCompile(`\b(Basic\s+)([A-Za-z0-9+/]{8,}={0,2})\b`)
 
 	// Key-value credential prefix matcher; value boundaries are parsed quote-aware in Go.
-	reKeyPrefix = regexp.MustCompile(`(?i)((?:\\"|\\'|["'])?((?:[a-zA-Z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|secret[_-]?key|secret[_-]?access[_-]?key|private[_-]?key|password|passwd|pwd|token|secret))(?:\\"|\\'|["'])?\s*([:=])\s*)`)
+	reKeyPrefix = regexp.MustCompile(`(?i)((?:\\"|\\'|["'])?((?:[a-zA-Z0-9_-]*)(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|secret[_-]?key|secret[_-]?access[_-]?key|private[_-]?key|password|passwd|pwd|token|secret))(?:\\"|\\'|["'])?\s*([:=])\s*)`)
 
 	// List of direct replacement patterns
 	directPatterns = []*regexp.Regexp{
@@ -57,6 +58,10 @@ var (
 	unquotedNonSecrets = map[string]struct{}{
 		"null": {}, "nil": {}, "true": {}, "false": {}, "none": {}, "undefined": {},
 		"the": {}, "this": {}, "that": {}, "from": {}, "with": {}, "must": {}, "will": {},
+		"string": {}, "number": {}, "boolean": {}, "bool": {}, "any": {}, "unknown": {},
+		"never": {}, "void": {}, "object": {}, "symbol": {}, "bigint": {}, "int": {},
+		"int32": {}, "int64": {}, "float32": {}, "float64": {}, "byte": {}, "rune": {},
+		"error": {},
 	}
 
 	sensitiveKeyNames = map[string]struct{}{
@@ -252,8 +257,19 @@ func redactKeyValues(s string) (string, bool) {
 			innerStart := valStart + 2
 			closeIdx := findEscapedQuoteClose(s, innerStart, q)
 			if closeIdx == -1 {
-				b.WriteString(s[cursor:prefixEnd])
-				cursor = prefixEnd
+				lineEnd := len(s)
+				if idx := strings.IndexAny(s[innerStart:], "\r\n"); idx != -1 {
+					lineEnd = innerStart + idx
+				}
+				inner := s[innerStart:lineEnd]
+				b.WriteString(s[cursor:innerStart])
+				if strings.TrimSpace(inner) != "" && inner != Mask {
+					b.WriteString(Mask)
+					changed = true
+				} else {
+					b.WriteString(inner)
+				}
+				cursor = lineEnd
 				continue
 			}
 			inner := s[innerStart:closeIdx]
@@ -275,8 +291,19 @@ func redactKeyValues(s string) (string, bool) {
 			innerStart := valStart + 1
 			closeIdx := findQuoteClose(s, innerStart, q)
 			if closeIdx == -1 {
-				b.WriteString(s[cursor:prefixEnd])
-				cursor = prefixEnd
+				lineEnd := len(s)
+				if idx := strings.IndexAny(s[innerStart:], "\r\n"); idx != -1 {
+					lineEnd = innerStart + idx
+				}
+				inner := s[innerStart:lineEnd]
+				b.WriteString(s[cursor:innerStart])
+				if strings.TrimSpace(inner) != "" && inner != Mask {
+					b.WriteString(Mask)
+					changed = true
+				} else {
+					b.WriteString(inner)
+				}
+				cursor = lineEnd
 				continue
 			}
 			inner := s[innerStart:closeIdx]
@@ -369,6 +396,9 @@ func scanUnquotedValueEnd(s string, start int) int {
 
 func shouldMaskUnquotedValue(op, val string) bool {
 	if val == "" || val == Mask {
+		return false
+	}
+	if val[0] == '=' {
 		return false
 	}
 	if _, skip := unquotedNonSecrets[strings.ToLower(val)]; skip {
@@ -485,6 +515,25 @@ func RedactAny(v any) any {
 func redactReflect(rv reflect.Value) reflect.Value {
 	if !rv.IsValid() {
 		return rv
+	}
+
+	if rv.Type() == reflect.TypeOf(json.RawMessage(nil)) {
+		if rv.IsNil() {
+			return rv
+		}
+		rawBytes := rv.Bytes()
+		var decoded any
+		if err := json.Unmarshal(rawBytes, &decoded); err == nil {
+			redacted := RedactAny(decoded)
+			if encoded, err := json.Marshal(redacted); err == nil {
+				out := reflect.New(rv.Type()).Elem()
+				out.SetBytes(encoded)
+				return out
+			}
+		}
+		out := reflect.New(rv.Type()).Elem()
+		out.SetBytes(RedactBytes(rawBytes))
+		return out
 	}
 
 	if rv.Type() == byteSliceType {

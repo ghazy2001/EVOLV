@@ -430,3 +430,48 @@ func TestSelfModify_ExecuteActionIntegration(t *testing.T) {
 		t.Fatalf("expected swapped=false with stage_only, got %v", res["swapped"])
 	}
 }
+
+func TestSelfModify_RollbackOnFailure(t *testing.T) {
+	a := testAgent(t)
+	srcDir := setupMockSourceRepo(t, "", "")
+
+	// 1. Existing file mutated to broken syntax should be rolled back to original
+	targetFile := filepath.Join(srcDir, "cmd", "evolv", "main.go")
+	origContent, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res := a.SelfModify(selfModifyOptions{
+		SourceRoot: srcDir,
+		Files: []fileMutation{
+			{Path: "cmd/evolv/main.go", Content: "package main\n\nsyntax error!"},
+		},
+	})
+	if res.OK {
+		t.Fatal("expected failure due to syntax error")
+	}
+
+	restoredContent, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restoredContent) != string(origContent) {
+		t.Fatalf("rollback failed: expected %q, got %q", string(origContent), string(restoredContent))
+	}
+
+	// 2. Newly created file should be removed on failure
+	newFile := filepath.Join(srcDir, "cmd", "evolv", "extra.go")
+	res = a.SelfModify(selfModifyOptions{
+		SourceRoot: srcDir,
+		Files: []fileMutation{
+			{Path: "cmd/evolv/extra.go", Content: "package main\n\nsyntax error 2!"},
+		},
+	})
+	if res.OK {
+		t.Fatal("expected failure due to syntax error")
+	}
+	if _, err := os.Stat(newFile); !os.IsNotExist(err) {
+		t.Fatalf("newly created file was not cleaned up on failure: %v", err)
+	}
+}

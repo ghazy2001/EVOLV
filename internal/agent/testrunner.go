@@ -101,7 +101,6 @@ type goTestEvent struct {
 func runGoTests(ctx context.Context, targetDir string) (*TestResult, error) {
 	cmd := exec.CommandContext(ctx, "go", "test", "-json", "./...")
 	cmd.Dir = targetDir
-	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
 	// An exit code error from go test is expected when tests fail; parse output first.
 	res := parseGoTestJSON(out)
@@ -245,7 +244,6 @@ func parseGoTestJSON(raw []byte) TestResult {
 func runNodeTests(ctx context.Context, targetDir string) (*TestResult, error) {
 	cmd := exec.CommandContext(ctx, "npm", "test")
 	cmd.Dir = targetDir
-	cmd.WaitDelay = 5 * time.Second
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	dur := time.Since(start).Milliseconds()
@@ -308,7 +306,6 @@ func parseNodeTestOutput(raw []byte, exitCode int) TestResult {
 func runPythonTests(ctx context.Context, targetDir string) (*TestResult, error) {
 	cmd := exec.CommandContext(ctx, "pytest", "-q", "--tb=short")
 	cmd.Dir = targetDir
-	cmd.WaitDelay = 5 * time.Second
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	dur := time.Since(start).Milliseconds()
@@ -368,7 +365,6 @@ var cargoResultRe = regexp.MustCompile(`test result: (?:ok|FAILED)\.\s+(\d+)\s+p
 func runCargoTests(ctx context.Context, targetDir string) (*TestResult, error) {
 	cmd := exec.CommandContext(ctx, "cargo", "test")
 	cmd.Dir = targetDir
-	cmd.WaitDelay = 5 * time.Second
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	dur := time.Since(start).Milliseconds()

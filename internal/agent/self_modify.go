@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -137,6 +138,7 @@ func (a *Agent) SelfModify(opt selfModifyOptions) SelfModifyResult {
 		if err != nil {
 			return SelfModifyResult{OK: false, Stage: "mutate", Error: err.Error()}
 		}
+		snap.writtenData = []byte(f.Content)
 		snapshots = append(snapshots, snap)
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return SelfModifyResult{OK: false, Stage: "mutate", Error: err.Error()}
@@ -425,23 +427,27 @@ func swapExecutable(src, dst string) error {
 
 // fileSnapshot records the prior state of a mutation target so it can be restored.
 type fileSnapshot struct {
-	path    string
-	existed bool
-	data    []byte
-	mode    os.FileMode
+	path        string
+	existed     bool
+	data        []byte
+	writtenData []byte
+	mode        os.FileMode
 }
 
 // takeSnapshot captures the current contents and permissions of path, or its absence.
 func takeSnapshot(path string) (fileSnapshot, error) {
 	snap := fileSnapshot{path: path}
-	data, err := os.ReadFile(path)
+	fi, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return snap, nil
 		}
 		return snap, err
 	}
-	fi, err := os.Stat(path)
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return snap, fmt.Errorf("cannot mutate symlink target: %s", path)
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return snap, err
 	}
@@ -456,10 +462,16 @@ func restoreSnapshots(snapshots []fileSnapshot) {
 	for i := len(snapshots) - 1; i >= 0; i-- {
 		s := snapshots[i]
 		if !s.existed {
-			_ = os.Remove(s.path)
+			// Only remove if the file still matches the content we wrote (no newer external edits)
+			if cur, err := os.ReadFile(s.path); err == nil && (len(s.writtenData) == 0 || bytes.Equal(cur, s.writtenData)) {
+				_ = os.Remove(s.path)
+			}
 			continue
 		}
-		_ = os.WriteFile(s.path, s.data, s.mode)
+		// Only restore if current file still matches what this mutation wrote (preserve user edits made during build/test)
+		if cur, err := os.ReadFile(s.path); err == nil && (len(s.writtenData) == 0 || bytes.Equal(cur, s.writtenData)) {
+			_ = os.WriteFile(s.path, s.data, s.mode)
+		}
 	}
 }
 

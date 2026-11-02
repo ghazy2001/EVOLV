@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -257,6 +258,43 @@ func TestSanitizeLogFastPath(t *testing.T) {
 		if !strings.Contains(gotDirty, "[REDACTED]") {
 			t.Fatalf("SanitizeLog missed credential in %q -> %q", secretLine, gotDirty)
 		}
+	}
+}
+
+func TestRedactCamelCaseAndUnterminated(t *testing.T) {
+	// CamelCase keys
+	got := Redact(`{"dbPassword": "hunter2_super_secret"}`)
+	if strings.Contains(got, "hunter2_super_secret") || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("camelCase key dbPassword not redacted: %s", got)
+	}
+
+	// Unterminated quotes (truncated log)
+	gotTrunc := Redact(`password="hunter2_unterminated_secret`)
+	if strings.Contains(gotTrunc, "hunter2_unterminated_secret") || !strings.Contains(gotTrunc, "[REDACTED]") {
+		t.Fatalf("unterminated quoted password not redacted: %s", gotTrunc)
+	}
+
+	// Double-equals comparison in code must NOT be corrupted
+	codeComparison := `if token == "" { return }`
+	if gotCode := Redact(codeComparison); gotCode != codeComparison {
+		t.Fatalf("comparison corrupted: expected %q, got %q", codeComparison, gotCode)
+	}
+
+	// TypeScript / language type declarations must NOT be masked
+	typeDecl := `password: string;`
+	if gotType := Redact(typeDecl); gotType != typeDecl {
+		t.Fatalf("type declaration corrupted: expected %q, got %q", typeDecl, gotType)
+	}
+
+	// json.RawMessage recursive redaction
+	rawMsg := json.RawMessage(`{"token":"secret_1234567890abcdef"}`)
+	res := RedactAny(rawMsg)
+	rawRes, ok := res.(json.RawMessage)
+	if !ok {
+		t.Fatalf("expected json.RawMessage, got %T", res)
+	}
+	if strings.Contains(string(rawRes), "secret_1234567890abcdef") || !strings.Contains(string(rawRes), "[REDACTED]") {
+		t.Fatalf("json.RawMessage secret not redacted: %s", string(rawRes))
 	}
 }
 

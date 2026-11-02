@@ -514,3 +514,45 @@ func TestImportRejectsSymlinkEscape(t *testing.T) {
 		t.Fatal("symlink escape wrote file outside workspace root")
 	}
 }
+
+func TestScanSecretsWordBoundary(t *testing.T) {
+	// Words containing "sk-" like task-management-workflow-plan must NOT be flagged as secrets
+	safe := []byte("This is a task-management-workflow-plan with risk-assessment and disk-usage.")
+	if err := scanSecrets("workspace/skills/task.md", safe); err != nil {
+		t.Fatalf("scanSecrets flagged harmless word containing sk-: %v", err)
+	}
+
+	// Real sk- key must be flagged
+	leaked := []byte("export OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz1234567890")
+	if err := scanSecrets("workspace/skills/leak.md", leaked); err == nil {
+		t.Fatal("scanSecrets failed to catch real sk- key")
+	}
+}
+
+func TestImportDestinationIsDirectory(t *testing.T) {
+	ws := newTestWorkspace(t)
+	// Create a directory at workspace/tools/conflict.js
+	dirTarget := filepath.Join(ws.Dir(ToolsDir), "conflict.js")
+	if err := os.MkdirAll(dirTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte("content")
+	sum := sha256.Sum256(payload)
+	targetRel := "workspace/tools/conflict.js"
+	packBytes := buildCustomPackBytes(t, []PackFileMeta{
+		{
+			Path:   targetRel,
+			SHA256: hex.EncodeToString(sum[:]),
+			Bytes:  int64(len(payload)),
+			Kind:   "tool",
+		},
+	}, map[string][]byte{
+		targetRel: payload,
+	})
+
+	_, err := ws.Import(bytes.NewReader(packBytes), ImportOptions{})
+	if err == nil || !strings.Contains(err.Error(), "destination workspace/tools/conflict.js is a directory") {
+		t.Fatalf("expected error when destination is a directory, got: %v", err)
+	}
+}
