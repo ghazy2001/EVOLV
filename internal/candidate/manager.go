@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -55,11 +56,14 @@ type Manager struct {
 
 func hash(raw []byte) string { return fmt.Sprintf("sha256:%x", sha256.Sum256(raw)) }
 func cleanRel(p string) (string, error) {
-	p = filepath.Clean(filepath.FromSlash(p))
-	if p == "." || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\") {
+	// Normalise both separators before cleaning. Windows-style traversals such
+	// as `..\escape.go` must be rejected on every platform, not just Windows.
+	raw := strings.ReplaceAll(p, "\\", "/")
+	clean := path.Clean(raw)
+	if clean == "." || clean == ".." || path.IsAbs(clean) || strings.HasPrefix(clean, "../") || strings.Contains(clean, ":") {
 		return "", fmt.Errorf("candidate path escapes source: %q", p)
 	}
-	return p, nil
+	return filepath.FromSlash(clean), nil
 }
 func slug(s string) string {
 	var b strings.Builder
