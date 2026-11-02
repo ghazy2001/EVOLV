@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/dxn111/EVOLV/internal/providers"
 	"github.com/dxn111/EVOLV/internal/redact"
@@ -38,7 +39,7 @@ func (a *Agent) saveMemory() {
 	for i, m := range hist {
 		safe[i] = providers.Message{
 			Role:    m.Role,
-			Content: redact.Redact(m.Content),
+			Content: sanitizePersistedContent(m.Content),
 		}
 	}
 	raw, err := json.Marshal(safe)
@@ -50,6 +51,19 @@ func (a *Agent) saveMemory() {
 		return
 	}
 	_ = os.Rename(tmp, a.memoryFile()) // atomic: a crash never tears memory
+}
+
+func sanitizePersistedContent(content string) string {
+	if strings.HasPrefix(content, "kernel:") {
+		payload := strings.TrimPrefix(content, "kernel:")
+		var decoded any
+		if json.Unmarshal([]byte(payload), &decoded) == nil {
+			if raw, err := json.Marshal(redact.RedactAny(decoded)); err == nil {
+				return "kernel:" + string(raw)
+			}
+		}
+	}
+	return redact.Redact(content)
 }
 
 // loadMemory restores a persisted conversation at boot, if any.

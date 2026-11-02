@@ -104,11 +104,12 @@ func TestParseGoTestJSON(t *testing.T) {
 }
 
 func TestParseGoTestJSONBuildFailure(t *testing.T) {
-	// Sample package build failure (syntax error)
+	// Go 1.24+ package build failure emitting build-output + FailedBuild
 	sample := `
-{"Time":"2026-11-01T12:00:00Z","Action":"output","Package":"example.com/broken","Output":"# example.com/broken\n"}
-{"Time":"2026-11-01T12:00:00.01Z","Action":"output","Package":"example.com/broken","Output":"main.go:5:2: syntax error: unexpected newline\n"}
-{"Time":"2026-11-01T12:00:00.02Z","Action":"fail","Package":"example.com/broken","Elapsed":0.01}
+{"Time":"2026-11-01T12:00:00Z","Action":"build-output","ImportPath":"example.com/broken [example.com/broken.test]","Output":"# example.com/broken [example.com/broken.test]\n"}
+{"Time":"2026-11-01T12:00:00.01Z","Action":"build-output","ImportPath":"example.com/broken [example.com/broken.test]","Output":"main.go:5:2: syntax error: unexpected newline\n"}
+{"Time":"2026-11-01T12:00:00.02Z","Action":"build-fail","ImportPath":"example.com/broken [example.com/broken.test]"}
+{"Time":"2026-11-01T12:00:00.03Z","Action":"fail","Package":"example.com/broken","Elapsed":0.01,"FailedBuild":"example.com/broken [example.com/broken.test]"}
 `
 	res := parseGoTestJSON([]byte(sample))
 	if res.Failed != 1 {
@@ -122,7 +123,7 @@ func TestParseGoTestJSONBuildFailure(t *testing.T) {
 	}
 }
 
-// ---------- node and pytest parsers ----------
+// ---------- node, pytest, and cargo parsers ----------
 
 func TestParseNodeTestOutput(t *testing.T) {
 	sample := `
@@ -130,6 +131,7 @@ PASS src/sum.test.js
 FAIL src/div.test.js
   ● division by zero
 
+Test Suites: 1 failed, 1 passed, 2 total
 Tests:       1 failed, 4 passed, 1 skipped, 6 total
 Snapshots:   0 total
 Time:        1.234 s
@@ -140,6 +142,36 @@ Time:        1.234 s
 	}
 	if len(res.Failures) != 1 {
 		t.Fatalf("expected 1 failure item, got %d", len(res.Failures))
+	}
+
+	// Empty zero-count successful output does not synthesize a fake passing test
+	emptyRes := parseNodeTestOutput([]byte("> my-app@1.0.0 test\n> echo ok\nok\n"), 0)
+	if emptyRes.Passed != 0 || emptyRes.Total != 0 || emptyRes.Failed != 0 {
+		t.Fatalf("expected zero counts for empty node run, got %+v", emptyRes)
+	}
+}
+
+func TestParseCargoTestOutput(t *testing.T) {
+	sample := `
+running 3 tests
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+
+running 2 tests
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+`
+	res := parseCargoTestOutput([]byte(sample), 101)
+	if res.Passed != 4 || res.Failed != 1 || res.Skipped != 1 || res.Total != 6 {
+		t.Fatalf("bad cargo multi-target parsing: %+v", res)
+	}
+	if len(res.Failures) != 1 {
+		t.Fatalf("expected 1 cargo failure entry, got %d", len(res.Failures))
+	}
+
+	// Non-zero exit after an ok lib target (e.g. later doc-test compile failure) still records failure
+	partial := `test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
+	resPartial := parseCargoTestOutput([]byte(partial), 101)
+	if resPartial.Failed != 1 {
+		t.Fatalf("expected non-zero cargo exit to record failure, got %+v", resPartial)
 	}
 }
 
@@ -237,5 +269,25 @@ func TestRunTestsUnsupportedFramework(t *testing.T) {
 	res := execOK(t, a, action{Action: "run_tests", Path: dir, Framework: "ruby"})
 	if res["ok"] != false || !strings.Contains(res["error"].(string), "unsupported") {
 		t.Fatalf("unsupported framework should be rejected: %v", res)
+	}
+}
+
+func TestRunTestsResolvesRelativePathAgainstWorkspace(t *testing.T) {
+	a := testAgent(t)
+	relDir := filepath.Join("projects", "submod")
+	absDir := filepath.Join(a.ws.Root, relDir)
+	if err := os.MkdirAll(absDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(absDir, "go.mod"), []byte("module example.com/submod\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(absDir, "sub_test.go"), []byte("package submod\nimport \"testing\"\nfunc TestSub(t *testing.T) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := execOK(t, a, action{Action: "run_tests", Path: relDir})
+	if res["ok"] != true || res["passed"].(float64) != 1 {
+		t.Fatalf("expected relative path %q to resolve against workspace root and pass: %v", relDir, res)
 	}
 }

@@ -88,3 +88,32 @@ func TestMemoryRedactsCredentials(t *testing.T) {
 		t.Fatalf("expected [REDACTED] in saved memory: %s", saved)
 	}
 }
+
+func TestMemoryRedactsToolResultBeforeJSONEncoding(t *testing.T) {
+	a, _ := mockAgent(t)
+	cfgPath := a.ws.Root + "/app_secret_cfg.json"
+	if err := os.WriteFile(cfgPath, []byte(`{"api_key":"mysecretpassword123","password":"correct horse battery staple"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	toolOut := a.Execute(action{Action: "read_file", Path: cfgPath})
+	a.history = []providers.Message{
+		{Role: "user", Content: toolOut},
+	}
+	a.saveMemory()
+
+	raw, err := os.ReadFile(a.memoryFile())
+	if err != nil {
+		t.Fatalf("memory file not written: %v", err)
+	}
+	saved := string(raw)
+	if strings.Contains(saved, "mysecretpassword123") {
+		t.Fatalf("JSON-encoded api_key leaked to conversation.json: %s", saved)
+	}
+	if strings.Contains(saved, "correct horse battery staple") {
+		t.Fatalf("JSON-encoded passphrase leaked to conversation.json: %s", saved)
+	}
+	if !strings.Contains(saved, "[REDACTED]") {
+		t.Fatalf("expected [REDACTED] in saved memory: %s", saved)
+	}
+}

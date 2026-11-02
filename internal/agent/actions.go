@@ -213,7 +213,12 @@ func (r *JSRuntime) loadPluginsLocked() {
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		codePath := filepath.Join(r.a.ws.Dir(workspace.PluginsDir), n, "plugin.js")
+		pluginDir := filepath.Join(r.a.ws.Dir(workspace.PluginsDir), n)
+		manifestInfo, err := os.Stat(filepath.Join(pluginDir, "plugin.json"))
+		if err != nil || manifestInfo.IsDir() {
+			continue
+		}
+		codePath := filepath.Join(pluginDir, "plugin.js")
 		raw, err := os.ReadFile(codePath)
 		if err != nil {
 			continue
@@ -653,19 +658,33 @@ func (a *Agent) Execute(act action) string {
 		res["cache"] = cache
 
 	case "run_tests":
-		target := strings.TrimSpace(act.Path)
-		if target == "" {
-			target = act.Cwd
+		rawTarget := strings.TrimSpace(act.Path)
+		if rawTarget == "" {
+			rawTarget = strings.TrimSpace(act.Cwd)
 		}
-		if target == "" {
-			target = a.ws.Config.ProjectDir
+		base := a.ws.Config.ProjectDir
+		if base == "" {
+			base = a.ws.Root
 		}
+		target := rawTarget
 		if target == "" {
-			target = a.ws.Root
+			target = base
+		} else if !filepath.IsAbs(target) {
+			candidate := filepath.Join(base, target)
+			if !dirExists(candidate) && base != a.ws.Root {
+				if alt := filepath.Join(a.ws.Root, target); dirExists(alt) {
+					candidate = alt
+				}
+			}
+			target = candidate
 		}
 		abs, err := filepath.Abs(target)
 		if err != nil || !dirExists(abs) {
-			res["ok"], res["error"] = false, "directory does not exist: "+target
+			errTarget := rawTarget
+			if errTarget == "" {
+				errTarget = target
+			}
+			res["ok"], res["error"] = false, "directory does not exist: "+errTarget
 			break
 		}
 
@@ -700,6 +719,9 @@ func (a *Agent) Execute(act action) string {
 		}
 		if tRes.Failed > 0 {
 			res["error"] = tRes.Summary
+			if tRes.Raw != "" {
+				res["raw"] = tRes.Raw
+			}
 		}
 
 	case "delete_file":
@@ -1130,15 +1152,11 @@ func (a *Agent) Execute(act action) string {
 		cmd := exec.CommandContext(ctx, bin, args...)
 		cmd.Dir = cwd
 		out, err := cmd.CombinedOutput()
-		outStr := string(out)
-		if len(outStr) > 8000 {
-			outStr = outStr[:8000] + "\n…(truncated)"
-		}
 		res["ok"] = err == nil
 		res["cwd"] = cwd
-		res["output"] = redact.Redact(outStr)
+		res["output"] = formatShellOutput(out)
 		if err != nil {
-			res["error"] = err.Error()
+			res["error"] = redact.Redact(err.Error())
 		}
 
 	case "stage_candidate":
@@ -1190,8 +1208,17 @@ func (a *Agent) Execute(act action) string {
 		res["error"] = "unknown action: " + act.Action
 	}
 
+	res = redact.RedactMap(res)
 	raw, _ := json.Marshal(res)
 	return "kernel:" + string(raw)
+}
+
+func formatShellOutput(out []byte) string {
+	outStr := redact.Redact(string(out))
+	if len(outStr) > 8000 {
+		outStr = outStr[:8000] + "\n…(truncated)"
+	}
+	return outStr
 }
 
 func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
@@ -1206,6 +1233,7 @@ func (a *Agent) commit(kind, name, path, desc string) {
 	a.evolution++
 	desc = redact.Redact(desc)
 	name = redact.Redact(name)
+	path = redact.Redact(path)
 	entry := map[string]any{
 		"n": a.evolution, "kind": kind, "name": name, "path": path, "description": desc,
 	}

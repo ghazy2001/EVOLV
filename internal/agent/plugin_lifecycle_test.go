@@ -123,3 +123,31 @@ func TestLoadAllClearsRemovedTools(t *testing.T) {
 		t.Fatalf("removed tool still live after rebuild: %+v", tools)
 	}
 }
+
+func TestLoadAllSkipsPluginsWithoutManifest(t *testing.T) {
+	a := testAgent(t)
+	dir := filepath.Join(a.ws.Dir(workspace.PluginsDir), "quarantined")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate partially unquarantined or stray plugin.js with plugin.json.quarantine
+	if err := os.WriteFile(filepath.Join(dir, "plugin.json.quarantine"), []byte(`{"name":"quarantined"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plugin.js"), []byte(`evolv.log("should not run");`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a.js.LoadAll()
+	if got := pluginSnapshot(a); len(got) != 0 {
+		t.Fatalf("expected plugin without plugin.json to be skipped, got %d sandboxes", len(got))
+	}
+
+	if err := os.Rename(filepath.Join(dir, "plugin.json.quarantine"), filepath.Join(dir, "plugin.json")); err != nil {
+		t.Fatal(err)
+	}
+	a.js.LoadAll()
+	if got := pluginSnapshot(a); len(got) != 1 {
+		t.Fatalf("expected plugin with restored plugin.json to load, got %d sandboxes", len(got))
+	}
+}

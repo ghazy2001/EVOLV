@@ -88,49 +88,54 @@ func runTestsSuite(ctx context.Context, framework, targetDir string) (*TestResul
 // ── Go (go test -json) ───────────────────────────────────────────────────────
 
 type goTestEvent struct {
-	Time    time.Time `json:"Time"`
-	Action  string    `json:"Action"`
-	Package string    `json:"Package"`
-	Test    string    `json:"Test"`
-	Elapsed float64   `json:"Elapsed"`
-	Output  string    `json:"Output"`
+	Time        time.Time `json:"Time"`
+	Action      string    `json:"Action"`
+	Package     string    `json:"Package"`
+	Test        string    `json:"Test"`
+	Elapsed     float64   `json:"Elapsed"`
+	Output      string    `json:"Output"`
+	ImportPath  string    `json:"ImportPath"`
+	FailedBuild string    `json:"FailedBuild"`
 }
 
 func runGoTests(ctx context.Context, targetDir string) (*TestResult, error) {
 	cmd := exec.CommandContext(ctx, "go", "test", "-json", "./...")
 	cmd.Dir = targetDir
+	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
 	// An exit code error from go test is expected when tests fail; parse output first.
 	res := parseGoTestJSON(out)
 	res.Framework = "go"
 	res.Target = targetDir
-	if res.Total == 0 && err != nil && len(res.Failures) == 0 {
-		res.Failed = 1
-		res.Total = 1
+	if err != nil && res.Failed == 0 {
+		res.Failed++
+		res.Total++
 		res.Failures = append(res.Failures, TestFailure{
-			Name:   "build",
+			Name:   "go test",
 			Output: truncateOutput(string(out), 4000),
 		})
-		res.Summary = "1 build failure"
+		res.Summary = fmt.Sprintf("go test exited abnormally: %v", err)
 	}
 	return &res, nil
 }
 
 func parseGoTestJSON(raw []byte) TestResult {
 	var (
-		passed   int
-		failed   int
-		skipped  int
-		failures []TestFailure
-		outputs  = map[string][]string{}
-		pkgFails = map[string]string{}
-		start    = time.Now()
-		hasTime  bool
-		minTime  time.Time
-		maxTime  time.Time
+		passed       int
+		failed       int
+		skipped      int
+		failures     []TestFailure
+		outputs      = map[string][]string{}
+		buildOutputs = map[string][]string{}
+		pkgFails     = map[string]string{}
+		start        = time.Now()
+		hasTime      bool
+		minTime      time.Time
+		maxTime      time.Time
 	)
 
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		var ev goTestEvent
@@ -156,6 +161,9 @@ func parseGoTestJSON(raw []byte) TestResult {
 		if ev.Action == "output" && ev.Output != "" {
 			outputs[key] = append(outputs[key], ev.Output)
 		}
+		if ev.Action == "build-output" && ev.Output != "" {
+			buildOutputs[ev.ImportPath] = append(buildOutputs[ev.ImportPath], ev.Output)
+		}
 
 		switch ev.Action {
 		case "pass":
@@ -177,7 +185,11 @@ func parseGoTestJSON(raw []byte) TestResult {
 				})
 			} else {
 				// Package-level failure (e.g. compilation error or setup panic)
-				pkgFails[ev.Package] = strings.Join(outputs[key], "")
+				pkgOut := strings.Join(outputs[key], "")
+				if ev.FailedBuild != "" {
+					pkgOut += strings.Join(buildOutputs[ev.FailedBuild], "")
+				}
+				pkgFails[ev.Package] = pkgOut
 			}
 		}
 	}
@@ -233,6 +245,7 @@ func parseGoTestJSON(raw []byte) TestResult {
 func runNodeTests(ctx context.Context, targetDir string) (*TestResult, error) {
 	cmd := exec.CommandContext(ctx, "npm", "test")
 	cmd.Dir = targetDir
+	cmd.WaitDelay = 5 * time.Second
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	dur := time.Since(start).Milliseconds()
@@ -248,25 +261,26 @@ func runNodeTests(ctx context.Context, targetDir string) (*TestResult, error) {
 }
 
 var (
-	nodePassRe = regexp.MustCompile(`(?i)(?:tests?:\s+)?(\d+)\s+passed`)
-	nodeFailRe = regexp.MustCompile(`(?i)(?:tests?:\s+)?(\d+)\s+failed`)
-	nodeSkipRe = regexp.MustCompile(`(?i)(?:tests?:\s+)?(\d+)\s+(?:skipped|todo)`)
+	nodeTestsLineRe = regexp.MustCompile(`(?im)^\s*Tests:.*$`)
+	nodePassRe      = regexp.MustCompile(`(?i)(?:tests?:\s+)?(\d+)\s+passed`)
+	nodeFailRe      = regexp.MustCompile(`(?i)(?:tests?:\s+)?(\d+)\s+failed`)
+	nodeSkipRe      = regexp.MustCompile(`(?i)(?:tests?:\s+)?(\d+)\s+(?:skipped|todo)`)
 )
 
 func parseNodeTestOutput(raw []byte, exitCode int) TestResult {
 	text := string(raw)
-	passed := extractFirstInt(nodePassRe, text)
-	failed := extractFirstInt(nodeFailRe, text)
-	skipped := extractFirstInt(nodeSkipRe, text)
+	summaryLine := nodeTestsLineRe.FindString(text)
+	if summaryLine == "" {
+		summaryLine = text
+	}
+	passed := extractFirstInt(nodePassRe, summaryLine)
+	failed := extractFirstInt(nodeFailRe, summaryLine)
+	skipped := extractFirstInt(nodeSkipRe, summaryLine)
 
 	if failed == 0 && exitCode != 0 {
 		failed = 1
 	}
 	total := passed + failed + skipped
-	if total == 0 && exitCode == 0 {
-		passed = 1
-		total = 1
-	}
 
 	var failures []TestFailure
 	if failed > 0 {
@@ -294,6 +308,7 @@ func parseNodeTestOutput(raw []byte, exitCode int) TestResult {
 func runPythonTests(ctx context.Context, targetDir string) (*TestResult, error) {
 	cmd := exec.CommandContext(ctx, "pytest", "-q", "--tb=short")
 	cmd.Dir = targetDir
+	cmd.WaitDelay = 5 * time.Second
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	dur := time.Since(start).Milliseconds()
@@ -348,9 +363,12 @@ func parsePytestOutput(raw []byte, exitCode int) TestResult {
 
 // ── Cargo (cargo test) ──────────────────────────────────────────────────────
 
+var cargoResultRe = regexp.MustCompile(`test result: (?:ok|FAILED)\.\s+(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
+
 func runCargoTests(ctx context.Context, targetDir string) (*TestResult, error) {
 	cmd := exec.CommandContext(ctx, "cargo", "test")
 	cmd.Dir = targetDir
+	cmd.WaitDelay = 5 * time.Second
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	dur := time.Since(start).Milliseconds()
@@ -358,15 +376,25 @@ func runCargoTests(ctx context.Context, targetDir string) (*TestResult, error) {
 	if err != nil {
 		exitCode = 1
 	}
-	text := string(out)
+	res := parseCargoTestOutput(out, exitCode)
+	res.Framework = "cargo"
+	res.Target = targetDir
+	res.DurationMS = dur
+	return &res, nil
+}
 
-	passRe := regexp.MustCompile(`test result: ok\.\s+(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
+func parseCargoTestOutput(raw []byte, exitCode int) TestResult {
+	text := string(raw)
 	var passed, failed, skipped int
-	if m := passRe.FindStringSubmatch(text); len(m) == 4 {
-		passed, _ = strconv.Atoi(m[1])
-		failed, _ = strconv.Atoi(m[2])
-		skipped, _ = strconv.Atoi(m[3])
-	} else if exitCode != 0 {
+	for _, m := range cargoResultRe.FindAllStringSubmatch(text, -1) {
+		p, _ := strconv.Atoi(m[1])
+		f, _ := strconv.Atoi(m[2])
+		s, _ := strconv.Atoi(m[3])
+		passed += p
+		failed += f
+		skipped += s
+	}
+	if failed == 0 && exitCode != 0 {
 		failed = 1
 	}
 
@@ -379,18 +407,16 @@ func runCargoTests(ctx context.Context, targetDir string) (*TestResult, error) {
 		})
 	}
 
-	return &TestResult{
-		Framework:  "cargo",
-		Target:     targetDir,
-		Passed:     passed,
-		Failed:     failed,
-		Skipped:    skipped,
-		Total:      total,
-		DurationMS: dur,
-		Failures:   failures,
-		Summary:    fmt.Sprintf("%d passed, %d failed", passed, failed),
-		Raw:        truncateOutput(text, 2000),
-	}, nil
+	return TestResult{
+		Framework: "cargo",
+		Passed:    passed,
+		Failed:    failed,
+		Skipped:   skipped,
+		Total:     total,
+		Failures:  failures,
+		Summary:   fmt.Sprintf("%d passed, %d failed", passed, failed),
+		Raw:       truncateOutput(text, 2000),
+	}
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

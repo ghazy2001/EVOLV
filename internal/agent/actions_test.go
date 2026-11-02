@@ -185,7 +185,12 @@ func TestCommitRedactsCredentials(t *testing.T) {
 	a := testAgent(t)
 	sub, _ := a.bus.Subscribe()
 
-	a.commit("tool", "my-key-sk-1234567890abcdef12345678", "workspace/tools/leak.js", "setup with ghp_1234567890abcdef1234567890abcdef12 and Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret")
+	a.commit(
+		"tool",
+		"my-key-sk-1234567890abcdef12345678",
+		"workspace/tools/ghu_1234567890abcdef1234567890abcdef12/leak.js",
+		"setup with ghp_1234567890abcdef1234567890abcdef12 and Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret",
+	)
 
 	var ev bus.Event
 	select {
@@ -197,6 +202,14 @@ func TestCommitRedactsCredentials(t *testing.T) {
 	var payload map[string]any
 	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
 		t.Fatalf("failed to unmarshal payload: %v", err)
+	}
+
+	busPath := payload["path"].(string)
+	if strings.Contains(busPath, "ghu_1234567890abcdef1234567890abcdef12") {
+		t.Fatalf("credential in path leaked to evolution bus event: %s", busPath)
+	}
+	if !strings.Contains(busPath, "[REDACTED]") {
+		t.Fatalf("expected [REDACTED] in bus event path: %s", busPath)
 	}
 
 	desc := payload["description"].(string)
@@ -220,5 +233,18 @@ func TestCommitRedactsCredentials(t *testing.T) {
 	}
 	if !strings.Contains(entryDesc, "[REDACTED]") {
 		t.Fatalf("expected [REDACTED] in ledger entry: %s", entryDesc)
+	}
+}
+
+func TestFormatShellOutputRedactsBeforeTruncation(t *testing.T) {
+	prefix := strings.Repeat("A", 7900) + "\n"
+	keyBody := "MIIEowIBAAKCAQEA0Y1+" + strings.Repeat("Z", 300)
+	pem := "-----BEGIN RSA PRIVATE KEY-----\n" + keyBody + "\n-----END RSA PRIVATE KEY-----\n"
+	out := formatShellOutput([]byte(prefix + pem))
+	if strings.Contains(out, "MIIEowIBAAKCAQEA0Y1+") {
+		t.Fatalf("private key body leaked due to pre-redaction truncation: %s", out[7880:])
+	}
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Fatalf("expected [REDACTED] in shell output")
 	}
 }
