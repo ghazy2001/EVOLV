@@ -112,6 +112,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/mind", s.handleMind)
 	s.mux.HandleFunc("/api/widgets", s.handleWidgets)
 	s.mux.HandleFunc("/api/creations", s.handleCreations)
+	s.mux.HandleFunc("/api/pack/export", s.handlePackExport)
+	s.mux.HandleFunc("/api/pack/inspect", s.handlePackInspect)
+	s.mux.HandleFunc("/api/pack/import", s.handlePackImport)
 	s.mux.HandleFunc("/api/agents", s.handleAgents)
 	s.mux.HandleFunc("/api/candidates", s.handleCandidates)
 	s.mux.HandleFunc("/api/genome", s.handleGenome)
@@ -1401,6 +1404,115 @@ func (s *Server) handleCreations(w http.ResponseWriter, r *http.Request) {
 	}
 	s.ws.SaveConfig()
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+func (s *Server) handlePackExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	opts := workspace.ExportOptions{
+		Author:        strings.TrimSpace(r.URL.Query().Get("author")),
+		Description:   strings.TrimSpace(r.URL.Query().Get("desc")),
+		IncludeLedger: r.URL.Query().Get("ledger") == "1" || r.URL.Query().Get("ledger") == "true",
+	}
+	filename := fmt.Sprintf("evolv-workspace-%s.evolvpack", time.Now().UTC().Format("20060102-150405"))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	if _, err := s.ws.Export(w, opts); err != nil {
+		return
+	}
+}
+
+func (s *Server) handlePackInspect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	reader, cleanup, err := getPackReader(r)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer cleanup()
+
+	report, err := s.ws.Import(reader, workspace.ImportOptions{
+		DryRun:            true,
+		QuarantinePlugins: true,
+	})
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(report)
+}
+
+func (s *Server) handlePackImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	reader, cleanup, err := getPackReader(r)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer cleanup()
+
+	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true" || r.FormValue("force") == "true" || r.FormValue("force") == "1"
+	quarantine := r.URL.Query().Get("quarantine") != "0" && r.URL.Query().Get("quarantine") != "false"
+
+	report, err := s.ws.Import(reader, workspace.ImportOptions{
+		DryRun:            false,
+		Force:             force,
+		QuarantinePlugins: quarantine,
+	})
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if s.ag != nil {
+		s.ag.ReloadGrownCode()
+	}
+	for _, p := range append(report.Created, report.Overwritten...) {
+		if s.bus != nil {
+			s.bus.Publish("fs:change", map[string]string{
+				"path":   filepath.ToSlash(filepath.Join("workspace", p)),
+				"op":     "write",
+				"source": "evolvpack",
+			})
+		}
+	}
+	if s.bus != nil {
+		s.bus.Publish("evolution", map[string]any{
+			"kind":        "pack",
+			"name":        "import",
+			"description": fmt.Sprintf("Imported %d creations from pack", len(report.Created)+len(report.Overwritten)),
+			"source":      "evolvpack",
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(report)
+}
+
+func getPackReader(r *http.Request) (io.Reader, func(), error) {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		if err := r.ParseMultipartForm(64 << 20); err != nil {
+			return nil, nil, err
+		}
+		file, _, err := r.FormFile("pack")
+		if err != nil {
+			file, _, err = r.FormFile("file")
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("missing pack file in form")
+		}
+		return file, func() { file.Close() }, nil
+	}
+	return r.Body, func() {}, nil
 }
 
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {

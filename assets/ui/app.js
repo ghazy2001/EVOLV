@@ -1198,6 +1198,55 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#btn-files').addEventListener('click', openGenome);
   $('#btn-library').addEventListener('click', openCreationLibrary);
   $('#btn-library-close').addEventListener('click', closeCreationLibrary);
+  $('#btn-pack-export').addEventListener('click', () => {
+    toast('📦 Packaging genome into .evolvpack…', 2000);
+    window.location.href = '/api/pack/export?ledger=1';
+  });
+  const packFileInput = $('#pack-file-input');
+  $('#btn-pack-import').addEventListener('click', () => {
+    packFileInput.value = '';
+    packFileInput.click();
+  });
+  packFileInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    toast(`🔍 Inspecting <b>${file.name}</b>…`, 2500);
+    try {
+      const inspectRes = await fetch('/api/pack/inspect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file
+      });
+      const report = await inspectRes.json();
+      if (!inspectRes.ok) {
+        toast(`⚠️ ${report.error || 'Failed to inspect package'}`);
+        return;
+      }
+      const m = report.manifest || {};
+      const fileCount = (m.files || []).length;
+      const confCount = (report.conflicts || []).filter(c => c.exists && !c.identical).length;
+      let msg = `Install .evolvpack (${fileCount} files by ${m.author || 'unknown'})?`;
+      if (confCount > 0) msg += `\n\nNotice: ${confCount} local files will be updated.`;
+      if (!confirm(msg)) return;
+
+      toast('📥 Installing package…', 3000);
+      const importRes = await fetch('/api/pack/import?force=1&quarantine=1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file
+      });
+      const importReport = await importRes.json();
+      if (importRes.ok) {
+        const added = (importReport.created || []).length + (importReport.overwritten || []).length;
+        toast(`✨ <b>Package installed!</b> ${added} files imported.`);
+        await loadCreationLibrary();
+      } else {
+        toast(`⚠️ ${importReport.error || 'Failed to import package'}`);
+      }
+    } catch (err) {
+      toast(`⚠️ Import error: ${err.message}`);
+    }
+  });
   $('#library-modal').addEventListener('click',e=>{if(e.target.id==='library-modal')closeCreationLibrary()});
   document.querySelectorAll('[data-library-tab]').forEach(b=>b.addEventListener('click',()=>setLibraryTab(b.dataset.libraryTab)));
   $('#library-search').addEventListener('input',renderCreationLibrary);
