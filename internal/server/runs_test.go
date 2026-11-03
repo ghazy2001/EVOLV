@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dxn111/EVOLV/internal/execution"
+	"github.com/dxn111/EVOLV/internal/workspace"
 )
 
 func TestRunsAPIEndToEnd(t *testing.T) {
@@ -215,5 +218,77 @@ func TestRunCancelAndRetryEndpoints(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &retryResp); err != nil || !retryResp.Ok || retryResp.Run.Status != execution.StatusQueued {
 		t.Fatalf("retry response invalid: %s", rec.Body.String())
+	}
+}
+
+func TestRunsJsServed(t *testing.T) {
+	s, _ := newWbServer(t)
+	uiDir := filepath.Join(s.ws.Root, workspace.UIRel())
+	if err := os.MkdirAll(uiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "assets", "ui", "runs.js"))
+	if err != nil {
+		t.Fatalf("failed to read source assets/ui/runs.js: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(uiDir, "runs.js"), raw, 0o644); err != nil {
+		t.Fatalf("failed to write runs.js into workspace UI: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/runs.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("runs.js -> %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "run-modal") || !strings.Contains(body, "renderRunDetail") {
+		t.Fatalf("runs.js does not contain expected inspector elements")
+	}
+}
+
+func TestRunDetailAndEventsIntegration(t *testing.T) {
+	s, _ := newWbServer(t)
+	create := `{"title":"inspector run","objective":"verify drawer detail","tasks":[
+		{"id":"t1","title":"step 1","objective":"initial task","status":"queued"}
+	]}`
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/runs/create", strings.NewReader(create)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create -> %d: %s", rec.Code, rec.Body.String())
+	}
+	var run struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify detail response has all required fields for UI
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs/detail?id="+run.ID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail -> %d: %s", rec.Code, rec.Body.String())
+	}
+	var detail map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail["run"] == nil || detail["progress"] == nil {
+		t.Fatalf("detail missing run or progress: %v", detail)
+	}
+
+	// Verify events response has events array
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs/events?id="+run.ID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("events -> %d: %s", rec.Code, rec.Body.String())
+	}
+	var eventsResp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &eventsResp); err != nil {
+		t.Fatal(err)
+	}
+	events, ok := eventsResp["events"].([]any)
+	if !ok || len(events) == 0 {
+		t.Fatalf("expected non-empty events array, got: %v", eventsResp)
 	}
 }

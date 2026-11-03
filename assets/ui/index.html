@@ -329,6 +329,45 @@
 
 <div id="toasts"></div>
 
+<div id="run-modal" class="run-modal" role="dialog" aria-label="Run Detail" aria-modal="true">
+  <div class="run-shell">
+    <header class="run-head-modal">
+      <div class="run-title-wrap">
+        <div class="run-title-row">
+          <h2 id="run-modal-title">Run Detail</h2>
+          <span id="run-modal-status" class="run-badge"></span>
+        </div>
+        <p id="run-modal-meta" class="run-meta-desc"></p>
+      </div>
+      <div class="run-head-actions">
+        <button class="run-btn-refresh" id="run-modal-refresh" type="button" title="Refresh run status" aria-label="Refresh run">↻ Refresh</button>
+        <button class="run-close" id="run-modal-close" type="button" aria-label="Close run detail">✕</button>
+      </div>
+    </header>
+    <div class="run-body-modal">
+      <div class="run-summary-bar">
+        <div class="run-objective-box" id="run-objective-box" hidden>
+          <span class="run-subhead">Objective</span>
+          <p id="run-objective-text"></p>
+        </div>
+        <div class="run-stats-grid" id="run-stats-grid"></div>
+      </div>
+      <nav class="run-tabs" aria-label="Run views">
+        <button class="active" data-run-tab="tasks" type="button">Tasks & Graph <b id="run-tab-tasks-count">0</b></button>
+        <button data-run-tab="journal" type="button">Journal & Evidence <b id="run-tab-events-count">0</b></button>
+      </nav>
+      <div class="run-views">
+        <div id="run-view-tasks" class="run-tab-pane">
+          <div id="run-tasks-list" class="run-tasks-list"></div>
+        </div>
+        <div id="run-view-journal" class="run-tab-pane" hidden>
+          <div id="run-events-list" class="run-events-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="organs-modal" class="organs-modal" role="dialog" aria-label="Organs" aria-modal="true">
   <div class="organs-shell">
     <header class="organs-head">
