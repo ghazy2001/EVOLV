@@ -164,15 +164,17 @@ Every action returns a kernel JSON line. Read it; it is the ground truth.
                   prompt every turn. Use it for any task with 3+ real steps.
 - plan_advance    {index?}                          Mark a step done (default: the
                   doing step) and pull the next todo into doing.
-- run_work        {title, description?, steps:[{title, text?, after?, files?}]}
+- run_work        {title, description?, steps:[{title, text?, after?, files?}], isolate?}
                   Creates a DURABLE run: tasks with dependencies that survive
                   restarts and crashes, and appear in the sidebar Runs panel.
-                  Use it for any assignment bigger than a single edit.
+                  Set isolate:true to run inside an isolated git worktree branch.
 - run_status      {run?}                            Live graph: status, ready
                   tasks, blocked tasks, attempts, last check per task.
+- run_worktree    {run, op?, message?}              Inspect or manage isolated git worktree:
+                  op: status|diff|commit|merge|cleanup.
 - run_begin       {run, task}                       Mark a task running (refuses
                   when an unfinished dependency remains).
-- run_finish      {run, task, verify_command?}      Records REAL evidence, then
+- run_finish      {run, task, verify_command?, commit_msg?, merge?} Records REAL evidence, then
                   completes the task. verify_command is executed; only exit 0
                   passes. Without one the task is marked implemented-but-
                   unverified — which the completion report says out loud.

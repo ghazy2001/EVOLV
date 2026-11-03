@@ -42,12 +42,16 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0, len(runs))
 	for _, run := range runs {
 		progress := run.Graph().Progress()
-		out = append(out, map[string]any{
+		entry := map[string]any{
 			"id": run.ID, "title": run.Title, "objective": run.Objective,
 			"status": run.Status, "created_at": run.CreatedAt, "updated_at": run.UpdatedAt,
 			"progress": progress,
 			"ready":    len(run.Graph().Ready()),
-		})
+		}
+		if run.Worktree != nil {
+			entry["worktree"] = run.Worktree
+		}
+		out = append(out, entry)
 	}
 	writeJSONOK(w, map[string]any{"runs": out})
 }
@@ -162,6 +166,7 @@ func (s *Server) handleRunCreate(w http.ResponseWriter, r *http.Request) {
 		Title     string           `json:"title"`
 		Objective string           `json:"objective"`
 		Tasks     []execution.Task `json:"tasks"`
+		Isolate   bool             `json:"isolate"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || strings.TrimSpace(in.Title) == "" || len(in.Tasks) == 0 {
 		writeJSONError(w, http.StatusBadRequest, "title and tasks are required")
@@ -176,6 +181,18 @@ func (s *Server) handleRunCreate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if in.Isolate {
+		repoDir := s.ws.Config.ProjectDir
+		if repoDir == "" {
+			repoDir = s.ws.Root
+		}
+		if execution.IsGitRepo(repoDir) {
+			if wt, err := execution.CreateWorktree(repoDir, run.ID, execution.WorktreeOptions{}); err == nil {
+				_ = store.AttachWorktree(run.ID, *wt)
+				run.Worktree = wt
+			}
+		}
 	}
 	s.recordOutcomes()
 	writeJSONOK(w, run)
@@ -316,4 +333,139 @@ func (s *Server) handleRunRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordOutcomes()
 	writeJSONOK(w, map[string]any{"ok": true, "run": run})
+}
+
+// handleRunWorktree manages or inspects the isolated git worktree for a run.
+func (s *Server) handleRunWorktree(w http.ResponseWriter, r *http.Request) {
+	store, err := s.runsStore()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	repoDir := s.ws.Config.ProjectDir
+	if repoDir == "" {
+		repoDir = s.ws.Root
+	}
+
+	if r.Method == http.MethodGet {
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			writeJSONError(w, http.StatusBadRequest, "id is required")
+			return
+		}
+		run, ok := store.Get(id)
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		if run.Worktree == nil {
+			writeJSONOK(w, map[string]any{"isolated": false})
+			return
+		}
+		diff, _ := execution.DiffWorktree(run.Worktree)
+		writeJSONOK(w, map[string]any{
+			"isolated": true,
+			"worktree": run.Worktree,
+			"diff":     diff,
+		})
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var in struct {
+		Run          string `json:"run"`
+		Action       string `json:"action"` // create | commit | merge | cleanup | diff
+		Message      string `json:"message"`
+		DeleteBranch bool   `json:"delete_branch"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Run == "" {
+		writeJSONError(w, http.StatusBadRequest, "run is required")
+		return
+	}
+	run, ok := store.Get(in.Run)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "run not found")
+		return
+	}
+
+	action := strings.ToLower(strings.TrimSpace(in.Action))
+	switch action {
+	case "create", "setup":
+		if run.Worktree != nil && run.Worktree.Active {
+			writeJSONOK(w, map[string]any{"ok": true, "worktree": run.Worktree})
+			return
+		}
+		if !execution.IsGitRepo(repoDir) {
+			writeJSONError(w, http.StatusBadRequest, "target directory is not a git repository")
+			return
+		}
+		wt, err := execution.CreateWorktree(repoDir, run.ID, execution.WorktreeOptions{})
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = store.AttachWorktree(run.ID, *wt)
+		writeJSONOK(w, map[string]any{"ok": true, "worktree": wt})
+
+	case "diff":
+		if run.Worktree == nil || !run.Worktree.Active {
+			writeJSONError(w, http.StatusBadRequest, "no active worktree for run")
+			return
+		}
+		diff, err := execution.DiffWorktree(run.Worktree)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, map[string]any{"ok": true, "diff": diff})
+
+	case "commit":
+		if run.Worktree == nil || !run.Worktree.Active {
+			writeJSONError(w, http.StatusBadRequest, "no active worktree for run")
+			return
+		}
+		msg := in.Message
+		if msg == "" {
+			msg = "chore(evolv): commit worktree changes"
+		}
+		hash, err := execution.CommitWorktree(run.Worktree, msg)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		run.Worktree.Commit = hash
+		_ = store.UpdateWorktree(run.ID, *run.Worktree)
+		writeJSONOK(w, map[string]any{"ok": true, "commit": hash})
+
+	case "merge":
+		if run.Worktree == nil || !run.Worktree.Active {
+			writeJSONError(w, http.StatusBadRequest, "no active worktree for run")
+			return
+		}
+		if err := execution.MergeWorktree(repoDir, run.Worktree); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = store.UpdateWorktree(run.ID, *run.Worktree)
+		writeJSONOK(w, map[string]any{"ok": true, "merged": true})
+
+	case "cleanup", "remove":
+		if run.Worktree == nil {
+			writeJSONOK(w, map[string]any{"ok": true})
+			return
+		}
+		if err := execution.RemoveWorktree(repoDir, run.Worktree, in.DeleteBranch); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = store.DetachWorktree(run.ID)
+		writeJSONOK(w, map[string]any{"ok": true, "cleaned": true})
+
+	default:
+		writeJSONError(w, http.StatusBadRequest, "unknown action: "+in.Action+" (allowed: create, diff, commit, merge, cleanup)")
+	}
 }

@@ -116,6 +116,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/runs/transition", s.handleRunTransition)
 	s.mux.HandleFunc("/api/runs/cancel", s.handleRunCancel)
 	s.mux.HandleFunc("/api/runs/retry", s.handleRunRetry)
+	s.mux.HandleFunc("/api/runs/worktree", s.handleRunWorktree)
 	s.mux.HandleFunc("/api/plan/compile", s.handlePlanCompile)
 	s.mux.HandleFunc("/api/plan/start", s.handlePlanStart)
 	s.mux.HandleFunc("/api/runs/insights", s.handleRunInsights)

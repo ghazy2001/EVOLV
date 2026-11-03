@@ -81,6 +81,12 @@
       meta.append(el('span', null, done + '/' + total + ' tasks'));
       if (p.failed) meta.append(el('span', null, p.failed + ' failed'));
       if (run.ready) meta.append(el('span', null, run.ready + ' ready'));
+      if (run.worktree && run.worktree.active) {
+        const wt = run.worktree;
+        const tag = el('span', 'run-worktree-tag', '🌿 ' + (wt.branch || 'isolated'));
+        if (wt.merged) tag.textContent += ' (merged)';
+        meta.append(tag);
+      }
       card.append(meta);
       const actions = el('div', 'run-actions');
       if (run.status === 'running' || run.status === 'planning' || run.status === 'queued') {

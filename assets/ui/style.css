@@ -996,6 +996,7 @@ body[data-appearance] .w-card, body[data-appearance] .input-wrap, body[data-appe
 .run-btn:hover { color: var(--fg); border-color: var(--line); }
 .run-btn.run-btn-danger:hover { color: var(--danger); border-color: var(--danger); }
 .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.run-worktree-tag { color: var(--accent); font-size: 8.5px; opacity: 0.9; }
 @media (prefers-reduced-motion: reduce) { .run-bar i { transition: none; } }
 
 /* ---------------- sidebar layout fixes ---------------- */
