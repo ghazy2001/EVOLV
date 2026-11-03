@@ -1419,6 +1419,9 @@ func (a *Agent) Execute(act action) string {
 	case "run_retry":
 		res = a.runRetry(act)
 
+	case "run_worktree":
+		res = a.runWorktree(act)
+
 	case "report":
 		rep := a.buildCompletionReport(firstNonEmptyText(act.Title, act.Summary, act.Desc))
 		res["ok"] = true

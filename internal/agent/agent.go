@@ -283,6 +283,10 @@ type action struct {
 	Kind           string            `json:"kind,omitempty"`    // organ kind for organ_* actions
 	Version        int               `json:"version,omitempty"` // organ version for history/rollback
 	Lesson         string            `json:"lesson,omitempty"`  // what was learned, for playbooks
+	Isolate        bool              `json:"isolate,omitempty"` // run in isolated git worktree
+	Merge          bool              `json:"merge,omitempty"`   // merge worktree into base repository
+	CommitMsg      string            `json:"commit_msg,omitempty"`
+	Op             string            `json:"op,omitempty"`      // sub-operation (e.g. for run_worktree)
 	Outcome        string            `json:"outcome,omitempty"` // verified | unverified | failed
 	Query          string            `json:"query,omitempty"`   // query for search_code
 	Regex          bool              `json:"regex,omitempty"`   // regex search flag

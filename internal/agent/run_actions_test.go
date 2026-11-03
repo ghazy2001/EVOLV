@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -257,6 +258,131 @@ func TestRunCancelAndRetryActions(t *testing.T) {
 	ready, _ := retryRes["ready"].([]any)
 	if len(ready) != 1 || ready[0] != "t1" {
 		t.Fatalf("expected t1 to be ready now: %v", ready)
+	}
+}
+
+func initTestGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_AUTHOR_NAME=tester",
+			"GIT_AUTHOR_EMAIL=tester@example.com",
+			"GIT_COMMITTER_NAME=tester",
+			"GIT_COMMITTER_EMAIL=tester@example.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s failed: %s (%v)", strings.Join(args, " "), string(out), err)
+		}
+	}
+	run("init")
+	run("config", "user.name", "tester")
+	run("config", "user.email", "tester@example.com")
+	run("config", "commit.gpgsign", "false")
+	readme := filepath.Join(dir, "README.md")
+	_ = os.WriteFile(readme, []byte("# Hello\n"), 0o644)
+	run("add", "README.md")
+	run("commit", "-m", "init")
+}
+
+func TestRunWorktreeIsolation(t *testing.T) {
+	a, _ := mockAgent(t)
+	proj := t.TempDir()
+	initTestGitRepo(t, proj)
+	a.ws.Config.ProjectDir = proj
+
+	// Start run with isolate: true
+	res := execRun(t, a, action{
+		Action:  "run_work",
+		Title:   "isolated run test",
+		Isolate: true,
+		Steps: []planStepArg{
+			{Title: "isolated step 1"},
+		},
+	})
+	if ok, _ := res["ok"].(bool); !ok {
+		t.Fatalf("run_work failed: %v", res)
+	}
+	runID, _ := res["run"].(string)
+	wtPath, _ := res["worktree"].(string)
+	branch, _ := res["branch"].(string)
+	if wtPath == "" || branch == "" {
+		t.Fatalf("expected worktree and branch, got worktree=%q branch=%q", wtPath, branch)
+	}
+
+	// Status check
+	stRes := execRun(t, a, action{
+		Action: "run_worktree",
+		Run:    runID,
+		Op:     "status",
+	})
+	if ok, _ := stRes["ok"].(bool); !ok || stRes["isolated"] != true {
+		t.Fatalf("run_worktree status failed: %v", stRes)
+	}
+
+	// Modify file in worktree
+	modFile := filepath.Join(wtPath, "newfile.txt")
+	if err := os.WriteFile(modFile, []byte("content from isolated run\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Diff check
+	diffRes := execRun(t, a, action{
+		Action: "run_worktree",
+		Run:    runID,
+		Op:     "diff",
+	})
+	if ok, _ := diffRes["ok"].(bool); !ok {
+		t.Fatalf("run_worktree diff failed: %v", diffRes)
+	}
+	diffText, _ := diffRes["diff"].(string)
+	if !strings.Contains(diffText, "newfile.txt") {
+		t.Fatalf("expected diff to include newfile.txt, got: %q", diffText)
+	}
+
+	// Commit worktree
+	commitRes := execRun(t, a, action{
+		Action:    "run_worktree",
+		Run:       runID,
+		Op:        "commit",
+		CommitMsg: "feat: add isolated file",
+	})
+	if ok, _ := commitRes["ok"].(bool); !ok || commitRes["commit"] == "" {
+		t.Fatalf("run_worktree commit failed: %v", commitRes)
+	}
+
+	// Merge worktree
+	mergeRes := execRun(t, a, action{
+		Action: "run_worktree",
+		Run:    runID,
+		Op:     "merge",
+	})
+	if ok, _ := mergeRes["ok"].(bool); !ok || mergeRes["merged"] != true {
+		t.Fatalf("run_worktree merge failed: %v", mergeRes)
+	}
+	if _, err := os.Stat(filepath.Join(proj, "newfile.txt")); err != nil {
+		t.Fatalf("newfile.txt should now exist in project after merge: %v", err)
+	}
+
+	// Cleanup worktree
+	cleanRes := execRun(t, a, action{
+		Action: "run_worktree",
+		Run:    runID,
+		Op:     "cleanup",
+	})
+	if ok, _ := cleanRes["ok"].(bool); !ok || cleanRes["cleaned"] != true {
+		t.Fatalf("run_worktree cleanup failed: %v", cleanRes)
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("worktree path %s should have been removed", wtPath)
 	}
 }
 

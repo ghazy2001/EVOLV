@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -215,5 +218,115 @@ func TestRunCancelAndRetryEndpoints(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &retryResp); err != nil || !retryResp.Ok || retryResp.Run.Status != execution.StatusQueued {
 		t.Fatalf("retry response invalid: %s", rec.Body.String())
+	}
+}
+
+func TestRunsWorktreeEndpoints(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	s, proj := newWbServer(t)
+
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = proj
+		cmd.Env = append(os.Environ(),
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_AUTHOR_NAME=tester",
+			"GIT_AUTHOR_EMAIL=tester@example.com",
+			"GIT_COMMITTER_NAME=tester",
+			"GIT_COMMITTER_EMAIL=tester@example.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %s (%v)", strings.Join(args, " "), string(out), err)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.name", "tester")
+	runGit("config", "user.email", "tester@example.com")
+	runGit("config", "commit.gpgsign", "false")
+	_ = os.WriteFile(filepath.Join(proj, "README.md"), []byte("# Hello\n"), 0o644)
+	runGit("add", "README.md")
+	runGit("commit", "-m", "initial")
+
+	// 1. Create run with isolate: true
+	create := `{"title":"isolated feature","tasks":[{"id":"t1","title":"do it"}],"isolate":true}`
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/runs/create", strings.NewReader(create)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create -> %d: %s", rec.Code, rec.Body.String())
+	}
+	var run struct {
+		ID       string `json:"id"`
+		Worktree *struct {
+			Path   string `json:"path"`
+			Branch string `json:"branch"`
+			Active bool   `json:"active"`
+		} `json:"worktree"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+	if run.Worktree == nil || !run.Worktree.Active || run.Worktree.Path == "" {
+		t.Fatalf("expected active worktree on run, got: %+v", run.Worktree)
+	}
+
+	// 2. GET /api/runs/worktree?id=...
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs/worktree?id="+run.ID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worktree get -> %d: %s", rec.Code, rec.Body.String())
+	}
+	var getOut struct {
+		Isolated bool `json:"isolated"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &getOut)
+	if !getOut.Isolated {
+		t.Fatal("expected isolated: true")
+	}
+
+	// 3. Write a file in the worktree
+	newFile := filepath.Join(run.Worktree.Path, "worktree_test.txt")
+	if err := os.WriteFile(newFile, []byte("created in worktree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. POST /api/runs/worktree action: diff
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/runs/worktree", strings.NewReader(`{"run":"`+run.ID+`","action":"diff"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("diff -> %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "worktree_test.txt") {
+		t.Fatalf("diff missing new file: %s", rec.Body.String())
+	}
+
+	// 5. POST /api/runs/worktree action: commit
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/runs/worktree", strings.NewReader(`{"run":"`+run.ID+`","action":"commit","message":"test commit"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("commit -> %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 6. POST /api/runs/worktree action: merge
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/runs/worktree", strings.NewReader(`{"run":"`+run.ID+`","action":"merge"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge -> %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(proj, "worktree_test.txt")); err != nil {
+		t.Fatalf("file should exist in proj after merge: %v", err)
+	}
+
+	// 7. POST /api/runs/worktree action: cleanup
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/runs/worktree", strings.NewReader(`{"run":"`+run.ID+`","action":"cleanup"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cleanup -> %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(run.Worktree.Path); !os.IsNotExist(err) {
+		t.Fatalf("worktree path %s should be deleted", run.Worktree.Path)
 	}
 }

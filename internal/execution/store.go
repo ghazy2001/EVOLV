@@ -13,15 +13,16 @@ import (
 
 // Run is one engineering assignment: a title, a task graph and a lifecycle.
 type Run struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Objective string `json:"objective,omitempty"`
-	Status    Status `json:"status"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
-	ClosedAt  string `json:"closed_at,omitempty"`
-	Tasks     []Task `json:"tasks"`
-	Seq       int64  `json:"seq"`
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Objective string    `json:"objective,omitempty"`
+	Status    Status    `json:"status"`
+	CreatedAt string    `json:"created_at"`
+	UpdatedAt string    `json:"updated_at"`
+	ClosedAt  string    `json:"closed_at,omitempty"`
+	Tasks     []Task    `json:"tasks"`
+	Seq       int64     `json:"seq"`
+	Worktree  *Worktree `json:"worktree,omitempty"`
 }
 
 // Graph returns the run's task graph.
@@ -29,15 +30,18 @@ func (r *Run) Graph() Graph { return Graph{Tasks: r.Tasks} }
 
 // Event kinds.
 const (
-	KindRunCreated  = "run.created"
-	KindTaskAdded   = "task.added"
-	KindTaskMoved   = "task.moved"
-	KindTaskAttempt = "task.attempt"
-	KindTaskError   = "task.error"
-	KindVerify      = "verify.added"
-	KindCheckpoint  = "checkpoint"
-	KindRunClosed   = "run.closed"
-	KindRunReopened = "run.reopened"
+	KindRunCreated      = "run.created"
+	KindTaskAdded       = "task.added"
+	KindTaskMoved       = "task.moved"
+	KindTaskAttempt     = "task.attempt"
+	KindTaskError       = "task.error"
+	KindVerify          = "verify.added"
+	KindCheckpoint      = "checkpoint"
+	KindRunClosed       = "run.closed"
+	KindRunReopened     = "run.reopened"
+	KindWorktreeCreated = "worktree.created"
+	KindWorktreeUpdated = "worktree.updated"
+	KindWorktreeRemoved = "worktree.removed"
 )
 
 // Store owns runs on disk: one directory per run with a journal and a
@@ -214,6 +218,16 @@ func applyEvent(run *Run, ev Event) {
 			run.Status = StatusQueued
 		}
 		run.ClosedAt = ""
+	case KindWorktreeCreated, KindWorktreeUpdated:
+		var wt Worktree
+		if json.Unmarshal(ev.Data, &wt) == nil {
+			run.Worktree = &wt
+		}
+	case KindWorktreeRemoved:
+		if run.Worktree != nil {
+			run.Worktree.Active = false
+			run.Worktree.Cleaned = true
+		}
 	}
 	run.UpdatedAt = ev.At
 }
@@ -636,8 +650,63 @@ func (s *Store) snapshotLocked(run *Run) error {
 	return os.Rename(tmp, path)
 }
 
+// AttachWorktree records an allocated isolated worktree for the run.
+func (s *Store) AttachWorktree(runID string, wt Worktree) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.runs[runID]
+	if !ok {
+		return fmt.Errorf("run %q not found", runID)
+	}
+	ev, err := s.journ[runID].Append(KindWorktreeCreated, "", wt)
+	if err != nil {
+		return err
+	}
+	run.Seq = ev.Seq
+	applyEvent(run, ev)
+	return s.snapshotLocked(run)
+}
+
+// UpdateWorktree updates the worktree state (e.g. after commit or merge).
+func (s *Store) UpdateWorktree(runID string, wt Worktree) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.runs[runID]
+	if !ok {
+		return fmt.Errorf("run %q not found", runID)
+	}
+	ev, err := s.journ[runID].Append(KindWorktreeUpdated, "", wt)
+	if err != nil {
+		return err
+	}
+	run.Seq = ev.Seq
+	applyEvent(run, ev)
+	return s.snapshotLocked(run)
+}
+
+// DetachWorktree marks the worktree as inactive and cleaned up.
+func (s *Store) DetachWorktree(runID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.runs[runID]
+	if !ok {
+		return fmt.Errorf("run %q not found", runID)
+	}
+	ev, err := s.journ[runID].Append(KindWorktreeRemoved, "", nil)
+	if err != nil {
+		return err
+	}
+	run.Seq = ev.Seq
+	applyEvent(run, ev)
+	return s.snapshotLocked(run)
+}
+
 func cloneRun(r *Run) *Run {
 	cp := *r
+	if r.Worktree != nil {
+		wtCopy := *r.Worktree
+		cp.Worktree = &wtCopy
+	}
 	cp.Tasks = make([]Task, len(r.Tasks))
 	for i, t := range r.Tasks {
 		t.DependsOn = append([]string(nil), t.DependsOn...)

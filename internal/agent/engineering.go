@@ -53,13 +53,16 @@ func (a *Agent) engineeringSection() string {
 		}
 		if shown == 0 {
 			b.WriteString("\n\n## IN-FLIGHT ENGINEERING WORK — keep this current\n")
-			b.WriteString("Durable runs outlive the conversation. Advance them with run_work (start), ")
+			b.WriteString("Durable runs outlive the conversation. Advance them with run_work (start, isolate:true for git worktree), ")
 			b.WriteString("run_finish (record evidence + mark a task done), run_fail (block or fail), ")
-			b.WriteString("run_cancel, run_retry, and run_status (inspect). Never claim a task is done without a passing verification.\n")
+			b.WriteString("run_cancel, run_retry, run_worktree (diff, commit, merge, cleanup), and run_status (inspect). Never claim a task is done without a passing verification.\n")
 		}
 		shown++
 		status := string(run.Status)
 		fmt.Fprintf(&b, "\n### run %s — %s [%s]\n", run.ID, run.Title, status)
+		if run.Worktree != nil && run.Worktree.Active {
+			fmt.Fprintf(&b, "worktree: %s [branch: %s]\n", run.Worktree.Path, run.Worktree.Branch)
+		}
 		if run.Objective != "" {
 			b.WriteString("objective: " + clip(run.Objective, 220) + "\n")
 		}

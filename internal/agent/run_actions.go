@@ -55,6 +55,34 @@ func (a *Agent) runStart(act action) map[string]any {
 	if err != nil {
 		return runErr(res, err.Error())
 	}
+
+	isolate := act.Isolate
+	if raw, ok := act.Args["isolate"].(bool); ok && raw {
+		isolate = true
+	}
+	if raw, ok := act.Args["worktree"].(bool); ok && raw {
+		isolate = true
+	}
+
+	if isolate {
+		repoDir := a.ws.Config.ProjectDir
+		if repoDir == "" {
+			repoDir = a.ws.Root
+		}
+		if execution.IsGitRepo(repoDir) {
+			wt, err := execution.CreateWorktree(repoDir, run.ID, execution.WorktreeOptions{})
+			if err != nil {
+				res["worktree_error"] = err.Error()
+			} else {
+				_ = store.AttachWorktree(run.ID, *wt)
+				res["worktree"] = wt.Path
+				res["branch"] = wt.Branch
+			}
+		} else {
+			res["worktree_warning"] = "not a git repository; proceeding without worktree isolation"
+		}
+	}
+
 	res["ok"] = true
 	res["run"] = run.ID
 	res["tasks"] = len(run.Tasks)
@@ -150,6 +178,34 @@ func (a *Agent) runFinish(act action) map[string]any {
 		res["verification"] = "verified"
 		a.recordPlaybook(run.ID, task.ID, task.Title, verify, task.Attempts, "verified", 0)
 	}
+
+	if run.Worktree != nil && run.Worktree.Active {
+		commitMsg := strings.TrimSpace(firstNonEmptyText(act.CommitMsg, act.Message))
+		if commitMsg != "" {
+			if commitHash, err := execution.CommitWorktree(run.Worktree, commitMsg); err == nil {
+				run.Worktree.Commit = commitHash
+				_ = store.UpdateWorktree(run.ID, *run.Worktree)
+				res["commit"] = commitHash
+			}
+		}
+		merge := act.Merge
+		if raw, ok := act.Args["merge"].(bool); ok && raw {
+			merge = true
+		}
+		if merge {
+			repoDir := a.ws.Config.ProjectDir
+			if repoDir == "" {
+				repoDir = a.ws.Root
+			}
+			if err := execution.MergeWorktree(repoDir, run.Worktree); err == nil {
+				_ = store.UpdateWorktree(run.ID, *run.Worktree)
+				res["merged"] = true
+			} else {
+				res["merge_error"] = err.Error()
+			}
+		}
+	}
+
 	if updated, ok := store.Get(run.ID); ok {
 		progress := updated.Graph().Progress()
 		res["progress"] = fmt.Sprintf("%d/%d done", progress.Completed, progress.Total)
@@ -244,6 +300,9 @@ func (a *Agent) runStatus(act action) map[string]any {
 	res["ready"] = idsOf(graph.Ready())
 	res["blocked"] = graph.Blocked()
 	res["tasks"] = tasks
+	if run.Worktree != nil {
+		res["worktree"] = run.Worktree
+	}
 	return res
 }
 
@@ -288,6 +347,129 @@ func (a *Agent) runRetry(act action) map[string]any {
 	return res
 }
 
+// runWorktree manages or inspects an isolated git worktree for a run.
+func (a *Agent) runWorktree(act action) map[string]any {
+	res := map[string]any{"action": "run_worktree", "run": act.Run}
+	runID := strings.TrimSpace(act.Run)
+	if runID == "" {
+		return runErr(res, "run_worktree needs a run id")
+	}
+	store, err := a.runStore()
+	if err != nil {
+		return runErr(res, err.Error())
+	}
+	defer store.CloseAll()
+	run, ok := store.Get(runID)
+	if !ok {
+		return runErr(res, "run not found: "+runID)
+	}
+
+	op := strings.ToLower(strings.TrimSpace(firstNonEmptyText(act.Op, act.Status)))
+	if raw, ok := act.Args["op"].(string); ok && op == "" {
+		op = strings.ToLower(strings.TrimSpace(raw))
+	}
+	if op == "" {
+		op = "status"
+	}
+
+	repoDir := a.ws.Config.ProjectDir
+	if repoDir == "" {
+		repoDir = a.ws.Root
+	}
+
+	switch op {
+	case "create", "setup":
+		if run.Worktree != nil && run.Worktree.Active {
+			res["ok"] = true
+			res["worktree"] = run.Worktree
+			return res
+		}
+		if !execution.IsGitRepo(repoDir) {
+			return runErr(res, "target directory is not a git repository")
+		}
+		wt, err := execution.CreateWorktree(repoDir, run.ID, execution.WorktreeOptions{})
+		if err != nil {
+			return runErr(res, err.Error())
+		}
+		if err := store.AttachWorktree(run.ID, *wt); err != nil {
+			return runErr(res, err.Error())
+		}
+		res["ok"] = true
+		res["worktree"] = wt
+		return res
+
+	case "status":
+		if run.Worktree == nil {
+			res["ok"] = true
+			res["isolated"] = false
+			return res
+		}
+		res["ok"] = true
+		res["isolated"] = true
+		res["worktree"] = run.Worktree
+		return res
+
+	case "diff":
+		if run.Worktree == nil || !run.Worktree.Active {
+			return runErr(res, "no active worktree for run "+runID)
+		}
+		diff, err := execution.DiffWorktree(run.Worktree)
+		if err != nil {
+			return runErr(res, err.Error())
+		}
+		res["ok"] = true
+		res["diff"] = diff
+		return res
+
+	case "commit":
+		if run.Worktree == nil || !run.Worktree.Active {
+			return runErr(res, "no active worktree for run "+runID)
+		}
+		msg := strings.TrimSpace(firstNonEmptyText(act.CommitMsg, act.Message, act.Desc, "chore(evolv): commit worktree changes"))
+		hash, err := execution.CommitWorktree(run.Worktree, msg)
+		if err != nil {
+			return runErr(res, err.Error())
+		}
+		run.Worktree.Commit = hash
+		_ = store.UpdateWorktree(run.ID, *run.Worktree)
+		res["ok"] = true
+		res["commit"] = hash
+		return res
+
+	case "merge":
+		if run.Worktree == nil || !run.Worktree.Active {
+			return runErr(res, "no active worktree for run "+runID)
+		}
+		if err := execution.MergeWorktree(repoDir, run.Worktree); err != nil {
+			return runErr(res, err.Error())
+		}
+		_ = store.UpdateWorktree(run.ID, *run.Worktree)
+		res["ok"] = true
+		res["merged"] = true
+		return res
+
+	case "remove", "cleanup":
+		if run.Worktree == nil {
+			res["ok"] = true
+			return res
+		}
+		deleteBranch := act.Force
+		if raw, ok := act.Args["delete_branch"].(bool); ok {
+			deleteBranch = raw
+		}
+		if err := execution.RemoveWorktree(repoDir, run.Worktree, deleteBranch); err != nil {
+			return runErr(res, err.Error())
+		}
+		_ = store.DetachWorktree(run.ID)
+		res["ok"] = true
+		res["cleaned"] = true
+		return res
+
+	default:
+		return runErr(res, "unknown worktree op: "+op+" (allowed: status, create, diff, commit, merge, cleanup)")
+	}
+}
+
 // runVerification executes a verification command and captures the evidence.
 // It is the same discipline the swarm execution mode uses: only a real exit
 // code counts, and only allow-listed commands run.
@@ -302,6 +484,12 @@ func (a *Agent) runVerification(runID, taskID, command string) execution.Verific
 	dir := a.ws.Config.ProjectDir
 	if dir == "" {
 		dir = a.ws.Root
+	}
+	if store, err := a.runStore(); err == nil {
+		if run, ok := store.Get(runID); ok && run.Worktree != nil && run.Worktree.Active && run.Worktree.Path != "" {
+			dir = run.Worktree.Path
+		}
+		store.CloseAll()
 	}
 	cctx, cancel := context.WithTimeout(context.Background(), maxVerificationSeconds*time.Second)
 	defer cancel()
