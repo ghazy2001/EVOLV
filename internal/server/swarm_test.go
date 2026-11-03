@@ -103,10 +103,7 @@ func TestSwarmStatePersists(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("start -> %d", rec.Code)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && s.swarm.Snapshot().Status == "running" {
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitSwarmSettled(t, s, 10*time.Second)
 	if got := s.swarm.Snapshot().Status; got != "done" {
 		t.Fatalf("run did not finish: %s", got)
 	}
@@ -133,10 +130,7 @@ func TestSwarmRunHistory(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("start -> %d", rec.Code)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && s.swarm.Snapshot().Status == "running" {
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitSwarmSettled(t, s, 10*time.Second)
 	id := s.swarm.Snapshot().ID
 	time.Sleep(30 * time.Millisecond)
 
@@ -219,10 +213,7 @@ func TestSwarmApplyComponent(t *testing.T) {
 		t.Fatalf("start -> %d", rec.Code)
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && s.swarm.Snapshot().Status == "running" {
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitSwarmSettled(t, s, 10*time.Second)
 	if s.swarm.Snapshot().Status != "done" {
 		t.Fatalf("swarm run did not complete: %s", s.swarm.Snapshot().Status)
 	}
@@ -315,6 +306,26 @@ func TestSwarmApplyProjectAndSecurity(t *testing.T) {
 
 // swarmWritesPending reports whether the swarm state file is still being
 // rewritten (a temp file exists), which means the run goroutine is mid-write.
+// waitSwarmSettled blocks until the run is no longer running AND no state
+// write is in flight. TempDir cleanup deletes the workspace as soon as the test
+// returns, so a goroutine still persisting last.json would fail the test with
+// "directory not empty" — a flake, not a product bug.
+func waitSwarmSettled(t *testing.T, s *Server, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if s.swarm.Snapshot().Status != "running" && !swarmWritesPending(s) {
+			// give an in-flight write one more scheduling window to finish
+			time.Sleep(20 * time.Millisecond)
+			if !swarmWritesPending(s) {
+				return
+			}
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatalf("swarm did not settle within %s (status %s)", timeout, s.swarm.Snapshot().Status)
+}
+
 func swarmWritesPending(s *Server) bool {
 	_, err := os.Stat(s.swarmStatePath() + ".tmp")
 	return err == nil
