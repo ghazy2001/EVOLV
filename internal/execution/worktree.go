@@ -199,6 +199,8 @@ func DiffWorktree(wt *Worktree) (string, error) {
 	if wt == nil || wt.Path == "" {
 		return "", errors.New("worktree is nil or has empty path")
 	}
+	// Mark untracked files as intent-to-add so newly created files appear as diff additions
+	_, _ = gitExec(nil, wt.Path, "add", "-N", ".")
 	// Diff against HEAD in the worktree
 	diff, err := gitExec(nil, wt.Path, "diff", "HEAD")
 	if err == nil && diff != "" {

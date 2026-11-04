@@ -390,21 +390,25 @@ func TestInterAgentDebate(t *testing.T) {
 	if d2 != "[AMEND]" || !strings.Contains(text2, "inline fix") {
 		t.Fatalf("extractDirective 2: got d=%q text=%q", d2, text2)
 	}
+	d3, text3 := extractDirective("Here is [amend] lowercase fix", "")
+	if d3 != "[AMEND]" || strings.Contains(strings.ToLower(text3), "[amend]") {
+		t.Fatalf("extractDirective 3: got d=%q text=%q", d3, text3)
+	}
 }
 
 func TestSwarmWorktreeIsolation(t *testing.T) {
 	// Initialize a temporary git repository
 	tmpDir := t.TempDir()
-	initCmd := exec.Command("git", "init", "-b", "main")
+	initCmd := exec.CommandContext(t.Context(), "git", "init", "-b", "main")
 	initCmd.Dir = tmpDir
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		t.Skipf("git not available or init failed: %v (%s)", err, out)
 	}
-	_ = exec.Command("git", "-C", tmpDir, "config", "user.name", "Tester").Run()
-	_ = exec.Command("git", "-C", tmpDir, "config", "user.email", "test@test.local").Run()
+	_ = exec.CommandContext(t.Context(), "git", "-C", tmpDir, "config", "user.name", "Tester").Run()
+	_ = exec.CommandContext(t.Context(), "git", "-C", tmpDir, "config", "user.email", "test@test.local").Run()
 	_ = os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# Swarm Test\n"), 0o644)
-	_ = exec.Command("git", "-C", tmpDir, "add", "README.md").Run()
-	_ = exec.Command("git", "-C", tmpDir, "commit", "-m", "initial commit").Run()
+	_ = exec.CommandContext(t.Context(), "git", "-C", tmpDir, "add", "README.md").Run()
+	_ = exec.CommandContext(t.Context(), "git", "-C", tmpDir, "commit", "-m", "initial commit").Run()
 
 	e := New(nil, nil)
 	e.SetRepoDir(tmpDir)
@@ -437,11 +441,17 @@ func TestSwarmWorktreeIsolation(t *testing.T) {
 		}
 	}
 	if !foundDiff && st.Diff == "" {
-		t.Log("Note: diff empty if worktree committed or no tracked files changed")
+		t.Fatal("expected diff artifact or state diff to be generated")
 	}
 
 	// Check if worktree directory exists
 	if _, err := os.Stat(st.Worktree); err != nil {
 		t.Fatalf("worktree directory %s should exist: %v", st.Worktree, err)
+	}
+
+	// Verify commit on swarm branch
+	logOut, err := exec.CommandContext(t.Context(), "git", "-C", tmpDir, "log", "-n", "1", "--oneline", st.Branch).Output()
+	if err != nil || len(logOut) == 0 {
+		t.Fatalf("expected commit on swarm branch %s, err: %v", st.Branch, err)
 	}
 }

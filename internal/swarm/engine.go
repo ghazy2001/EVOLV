@@ -54,8 +54,8 @@ type Message struct {
 	Kind      string `json:"kind"` // idea | code | test | review | final | system | debate | steer | revision
 	Text      string `json:"text"`
 	Time      string `json:"time"`
-	ReplyTo   string `json:"reply_to,omitempty"`   // agent or message id being answered
-	Directive string `json:"directive,omitempty"`  // [CHALLENGE], [AMEND], [PROPOSE], [CONCEDE]
+	ReplyTo   string `json:"reply_to,omitempty"`  // agent or message id being answered
+	Directive string `json:"directive,omitempty"` // [CHALLENGE], [AMEND], [PROPOSE], [CONCEDE]
 }
 
 // Vote is one agent's answer to a poll. Choice is zero-based.
@@ -594,7 +594,6 @@ func (e *Engine) run(ctx context.Context) {
 				return
 			}
 			directive, cleanText := extractDirective(challenge, "[CHALLENGE]")
-			e.addMessageWithReply(criticAgent.ID, "debate", cleanText, targetIdea.Agent, directive)
 
 			responderAgent := targetIdea.Agent
 			if !e.hasAgent(responderAgent) {
@@ -603,6 +602,7 @@ func (e *Engine) run(ctx context.Context) {
 					responderAgent = ideatorList[0].ID
 				}
 			}
+			e.addMessageWithReply(criticAgent.ID, "debate", cleanText, responderAgent, directive)
 			if responderAgent != "" {
 				defensePrompt := e.debateDefensePrompt(responderAgent, targetIdea, cleanText)
 				defense, err := e.callAgent(ctx, responderAgent, defensePrompt)
@@ -1037,19 +1037,19 @@ func (e *Engine) batchVotePrompt(role Role, agents []AgentState, question string
 	return b.String()
 }
 
-var directiveRegex = regexp.MustCompile(`^\[(CHALLENGE|AMEND|PROPOSE|CONCEDE|VOTE)\]\s*`)
+var directiveRegex = regexp.MustCompile(`^(?i)\[(CHALLENGE|AMEND|PROPOSE|CONCEDE|VOTE)\]\s*`)
+var inlineDirectiveRegex = regexp.MustCompile(`(?i)\[(CHALLENGE|AMEND|PROPOSE|CONCEDE)\]`)
 
 func extractDirective(text, fallback string) (string, string) {
 	text = strings.TrimSpace(text)
 	if m := directiveRegex.FindStringSubmatch(text); len(m) > 1 {
 		clean := strings.TrimSpace(text[len(m[0]):])
-		return "[" + m[1] + "]", clean
+		return "[" + strings.ToUpper(m[1]) + "]", clean
 	}
-	for _, d := range []string{"[CHALLENGE]", "[AMEND]", "[PROPOSE]", "[CONCEDE]"} {
-		if strings.Contains(strings.ToUpper(text), d) {
-			clean := strings.Replace(text, d, "", 1)
-			return d, strings.TrimSpace(clean)
-		}
+	if loc := inlineDirectiveRegex.FindStringSubmatchIndex(text); loc != nil {
+		d := "[" + strings.ToUpper(text[loc[2]:loc[3]]) + "]"
+		clean := text[:loc[0]] + text[loc[1]:]
+		return d, strings.TrimSpace(clean)
 	}
 	return fallback, text
 }
