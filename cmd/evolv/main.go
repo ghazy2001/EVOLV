@@ -251,7 +251,7 @@ func main() {
 	// The browser opens by default. `--no-open` disables it for one run, and
 	// the config's open_browser flag is an explicit opt-out. `--open` wins
 	// over the config so a stale genome can't hide the UI.
-	headless := os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == ""
+	headless := runtime.GOOS != "windows" && runtime.GOOS != "darwin" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == ""
 	opening := !*noOpen && !headless && (*open || ws.Config.OpenBrowser)
 
 	bootCard(url, prov.Name(), model, ws.Root, opening, headless, time.Since(bootStart))

@@ -111,8 +111,14 @@
     background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(8px);
   }
   .top h1 { font-family: var(--serif); font-size: 24px; font-weight: 600; letter-spacing: -.02em; }
-  .top p { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .top p { color: var(--muted); font-size: 12px; margin-top: 2px; display: inline-flex; align-items: center; flex-wrap: wrap; }
   .run-meta { color: var(--faint); font: 500 9.5px/1 var(--mono); margin-left: 9px; letter-spacing: .02em; }
+  .branch-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    font: 600 9px/1 var(--mono); color: #236c2b; background: #edf7ed;
+    border: 1px solid #bce2be; padding: 3px 8px; border-radius: 999px;
+    margin-left: 10px; letter-spacing: .02em;
+  }
   .phase-rail { display: flex; gap: 4px; padding: 7px 34px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 40%, var(--bg)); overflow: auto; }
   .phase-step { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; color: var(--faint); font: 600 8px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; padding: 3px 6px; border-radius: 999px; }
   .phase-step .p-dot { width: 4px; height: 4px; border-radius: 50%; background: #c8bfb0; }
@@ -183,6 +189,35 @@
     border: 1px solid #33312c;
   }
   .msg.kind-system .body { color: var(--muted); font-size: 12.5px; }
+  .msg.kind-debate {
+    border-left: 3px solid var(--accent);
+    padding-left: 14px;
+    background: color-mix(in srgb, var(--accent-soft) 28%, transparent);
+    border-radius: 8px;
+    margin: 6px 0;
+  }
+  .msg-directive {
+    display: inline-flex; align-items: center;
+    font: 700 9px/1 var(--mono); padding: 2px 6px; border-radius: 4px;
+    letter-spacing: .05em; text-transform: uppercase;
+  }
+  .msg-directive.dir-challenge { background: #fbebe7; color: var(--danger); border: 1px solid #e5c3bb; }
+  .msg-directive.dir-amend { background: #eef4fb; color: #245a96; border: 1px solid #bfd7f3; }
+  .msg-directive.dir-propose { background: #edf7ed; color: #236c2b; border: 1px solid #bce2be; }
+  .msg-directive.dir-concede { background: #f4f3ef; color: var(--muted); border: 1px solid #ded9ce; }
+  .msg-reply {
+    display: inline-flex; align-items: center; gap: 4px;
+    font: 500 9px/1 var(--mono); color: var(--muted);
+    background: color-mix(in srgb, var(--panel) 60%, var(--bg));
+    padding: 2px 6px; border-radius: 4px; border: 1px solid var(--line);
+  }
+  .artifact pre.diff-view {
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+    background: #1e1e1c; color: #d4d0c7;
+  }
+  .diff-line-add { color: #85e89d; background: rgba(46, 160, 67, 0.15); display: block; }
+  .diff-line-del { color: #f97583; background: rgba(248, 81, 73, 0.15); display: block; }
+  .diff-line-hdr { color: #79b8ff; font-weight: 600; display: block; }
 
   .error {
     margin: 0 34px 10px; padding: 10px 13px; border: 1px solid #e5c3bb;
@@ -320,7 +355,7 @@
     <header class="top">
       <div>
         <h1>Swarm mode</h1>
-        <p><span class="phase-dot" id="phase-dot"></span><span id="phase">idle · many minds, one organism</span><span class="run-meta" id="run-meta"></span></p>
+        <p><span class="phase-dot" id="phase-dot"></span><span id="phase">idle · many minds, one organism</span><span class="run-meta" id="run-meta"></span><span class="branch-pill" id="branch-pill" hidden><span id="branch-icon">🌿</span><span id="branch-name"></span></span></p>
       </div>
       <div class="top-actions">
         <select class="history-select" id="history" aria-label="Run history">
@@ -338,7 +373,7 @@
         <div class="empty" id="empty">
           <div class="orb">◇</div>
           <h2>Give the swarm a mission.</h2>
-          <p>Up to 100 role-specialised agents share a transcript, build in turns, and settle decisions with explicit votes. You watch the colony think.</p>
+          <p>Up to 200 role-specialised agents share a transcript, build in turns, and settle decisions with explicit votes. You watch the colony think.</p>
           <div class="chips">
             <button class="chip" data-mission="Design a tiny focus timer that lives on the EVOLV canvas">a focus timer</button>
             <button class="chip" data-mission="Build a local-first habit tracker with a weekly review">a habit tracker</button>
@@ -360,6 +395,8 @@
             <option value="25">25 agents</option>
             <option value="50">50 agents</option>
             <option value="100">100 agents</option>
+            <option value="140">140 agents (fleet)</option>
+            <option value="200">200 agents (max)</option>
           </select>
         </label>
         <span>enter to start · shift+enter for a new line</span>
@@ -404,6 +441,8 @@
   const sizeSelect = $('#size');
   const activityEl = $('#activity');
   const runMeta = $('#run-meta');
+  const branchPill = $('#branch-pill');
+  const branchName = $('#branch-name');
   const activityText = $('#activity-text');
   const roleFilterEl = $('#role-filter');
   const exportBtn = $('#export');
@@ -425,6 +464,7 @@
     idle: 'idle · many minds, one organism',
     recruiting: 'recruiting the colony',
     ideating: 'ideating · finding the shape',
+    debating: 'debating · challenging and refining directions',
     voting: 'voting · choosing a direction',
     coding: 'coding · building the chosen direction',
     testing: 'testing · trying to break it',
@@ -529,7 +569,7 @@
     for (const r of roles) roleFilterEl.append(make(r.id, r.name));
   }
 
-  const phaseOrder = ['ideating', 'voting', 'coding', 'testing', 'reviewing', 'shipping', 'judging'];
+  const phaseOrder = ['ideating', 'debating', 'voting', 'coding', 'testing', 'reviewing', 'shipping', 'judging'];
   function renderPhaseRail() {
     phaseRail.replaceChildren();
     const active = state.status === 'done' ? -1 : phaseOrder.indexOf(state.phase);
@@ -538,6 +578,19 @@
       step.prepend(el('span', 'p-dot'));
       phaseRail.append(step);
     });
+  }
+
+  function renderAgentDot(ctx, a, x, y, glowR, dotR) {
+    const thinking = a.status === 'thinking';
+    const color = a.color || '#8a8174';
+    ctx.globalAlpha = a.status === 'done' ? 0.48 : 0.95;
+    if (thinking) {
+      ctx.fillStyle = color; ctx.globalAlpha = 0.22;
+      ctx.beginPath(); ctx.arc(x, y, glowR, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x, y, thinking ? (dotR + 0.8) : dotR, 0, Math.PI * 2); ctx.fill();
   }
 
   function drawMap() {
@@ -557,27 +610,34 @@
     ctx.beginPath(); ctx.arc(cx, cy, 7, 0, Math.PI * 2); ctx.stroke();
     ctx.fillStyle = '#c96442'; ctx.beginPath(); ctx.arc(cx, cy, 3.2, 0, Math.PI * 2); ctx.fill();
     const n = agents.length;
-    const rings = Math.max(1, Math.ceil(n / 12));
-    const maxR = Math.min(w, h) * 0.40;
-    const stepR = rings > 1 ? (maxR - 16) / (rings - 1) : 0;
-    for (let i = 0; i < n; i++) {
-      const a = agents[i];
-      const ring = Math.floor(i / 12);
-      const count = Math.min(12, n - ring * 12);
-      const angle = ((i % 12) / count) * Math.PI * 2 + ring * 0.32;
-      const radius = 16 + ring * stepR;
-      const x = cx + Math.cos(angle) * radius;
-      const y = cy + Math.sin(angle) * radius * 0.72;
-      const thinking = a.status === 'thinking';
-      const color = a.color || '#8a8174';
-      ctx.globalAlpha = a.status === 'done' ? 0.48 : 0.95;
-      if (thinking) {
-        ctx.fillStyle = color; ctx.globalAlpha = 0.16;
-        ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.fill();
-        ctx.globalAlpha = 1;
+    if (n <= 25) {
+      const rings = Math.max(1, Math.ceil(n / 12));
+      const maxR = Math.min(w, h) * 0.40;
+      const stepR = rings > 1 ? (maxR - 16) / (rings - 1) : 0;
+      for (let i = 0; i < n; i++) {
+        const a = agents[i];
+        const ring = Math.floor(i / 12);
+        const count = Math.min(12, n - ring * 12);
+        const angle = ((i % 12) / count) * Math.PI * 2 + ring * 0.32;
+        const radius = 16 + ring * stepR;
+        const x = cx + Math.cos(angle) * radius;
+        const y = cy + Math.sin(angle) * radius * 0.72;
+        renderAgentDot(ctx, a, x, y, 6, 2.2);
       }
-      ctx.fillStyle = color;
-      ctx.beginPath(); ctx.arc(x, y, thinking ? 3 : 2.2, 0, Math.PI * 2); ctx.fill();
+    } else {
+      // Golden angle spiral (Phyllotaxis / organism swarm layout) for large colonies (up to 200 agents)
+      const maxR = Math.min(w, h) * 0.42;
+      const goldenAngle = 2.39996323; // pi * (3 - sqrt(5))
+      const dotR = n > 100 ? 1.8 : 2.2;
+      const glowR = n > 100 ? 4.5 : 5.5;
+      for (let i = 0; i < n; i++) {
+        const a = agents[i];
+        const r = 14 + Math.sqrt((i + 0.5) / n) * (maxR - 14);
+        const angle = i * goldenAngle;
+        const x = cx + Math.cos(angle) * r;
+        const y = cy + Math.sin(angle) * r * 0.75;
+        renderAgentDot(ctx, a, x, y, glowR, dotR);
+      }
     }
     ctx.globalAlpha = 1;
     $('#map-count').textContent = String(n);
@@ -618,6 +678,18 @@
       const who = el('div', 'who');
       who.append(el('b', null, role.name || m.role));
       who.append(el('span', null, (m.kind || 'says') + ' · ' + timeOf(m.time)));
+
+      if (m.directive) {
+        const dirClean = m.directive.toLowerCase().replace(/[^a-z]/g, '');
+        who.append(el('span', 'msg-directive dir-' + dirClean, m.directive));
+      }
+
+      if (m.reply_to) {
+        const replyTag = el('span', 'msg-reply');
+        replyTag.textContent = '↳ reply to @' + m.reply_to;
+        who.append(replyTag);
+      }
+
       main.append(who);
       const body = el('div', 'body');
       if (m.kind === 'code' || m.kind === 'test') {
@@ -709,7 +781,20 @@
       const summary = el('summary');
       summary.append(el('span', null, a.name));
       summary.append(el('small', null, a.kind || 'artifact'));
-      const pre = el('pre', null, a.content || '');
+      const pre = el('pre', null);
+      if (a.kind === 'diff' || a.name.endsWith('.diff')) {
+        pre.className = 'diff-view';
+        const lines = (a.content || '').split('\n');
+        for (const line of lines) {
+          const span = el('span', null, line + '\n');
+          if (line.startsWith('+') && !line.startsWith('+++')) span.className = 'diff-line-add';
+          else if (line.startsWith('-') && !line.startsWith('---')) span.className = 'diff-line-del';
+          else if (line.startsWith('@@') || line.startsWith('diff --git')) span.className = 'diff-line-hdr';
+          pre.append(span);
+        }
+      } else {
+        pre.textContent = a.content || '';
+      }
 
       const actions = el('div', 'artifact-actions');
       const copyBtn = el('button', 'artifact-btn', 'copy');
@@ -812,6 +897,13 @@
     if (state.calls) meta.push(state.calls + ' calls');
     if (state.elapsed_ms) meta.push((state.elapsed_ms / 1000).toFixed(1) + 's');
     runMeta.textContent = meta.join(' · ');
+    if (state.branch) {
+      branchPill.hidden = false;
+      branchName.textContent = state.branch;
+      branchPill.title = state.worktree ? 'Git worktree: ' + state.worktree : 'Isolated branch: ' + state.branch;
+    } else {
+      branchPill.hidden = true;
+    }
     phaseDot.classList.toggle('busy', running);
     phaseDot.style.background = state.status === 'error' ? 'var(--danger)' : '';
     runBtn.disabled = false;

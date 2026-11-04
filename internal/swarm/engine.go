@@ -8,10 +8,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/dxn111/EVOLV/internal/execution"
 	"github.com/dxn111/EVOLV/internal/providers"
 )
 
@@ -44,12 +48,14 @@ func roleByID(id string) (Role, bool) {
 
 // Message is one line in the shared colony transcript.
 type Message struct {
-	ID    string `json:"id"`
-	Agent string `json:"agent,omitempty"` // specific agent, e.g. coder-02
-	Role  string `json:"role"`
-	Kind  string `json:"kind"` // idea | code | test | review | final | system
-	Text  string `json:"text"`
-	Time  string `json:"time"`
+	ID        string `json:"id"`
+	Agent     string `json:"agent,omitempty"` // specific agent, e.g. coder-02
+	Role      string `json:"role"`
+	Kind      string `json:"kind"` // idea | code | test | review | final | system | debate | steer | revision
+	Text      string `json:"text"`
+	Time      string `json:"time"`
+	ReplyTo   string `json:"reply_to,omitempty"`   // agent or message id being answered
+	Directive string `json:"directive,omitempty"`  // [CHALLENGE], [AMEND], [PROPOSE], [CONCEDE]
 }
 
 // Vote is one agent's answer to a poll. Choice is zero-based.
@@ -112,6 +118,9 @@ type State struct {
 	Poll      *Poll        `json:"poll,omitempty"`
 	Polls     []Poll       `json:"polls,omitempty"`
 	Artifacts []Artifact   `json:"artifacts"`
+	Worktree  string       `json:"worktree,omitempty"`
+	Branch    string       `json:"branch,omitempty"`
+	Diff      string       `json:"diff,omitempty"`
 }
 
 type providerSource func() (providers.Provider, string)
@@ -123,6 +132,9 @@ type Engine struct {
 	mu      sync.Mutex
 	source  providerSource
 	publish publisher
+
+	repoDir  string
+	worktree *execution.Worktree
 
 	state     State
 	running   bool
@@ -144,6 +156,13 @@ func New(source providerSource, publish publisher) *Engine {
 	return e
 }
 
+// SetRepoDir configures the workspace repository directory for worktree-isolated builds.
+func (e *Engine) SetRepoDir(dir string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.repoDir = dir
+}
+
 func (e *Engine) emit() {
 	if e.publish == nil {
 		return
@@ -160,8 +179,8 @@ func clampSize(n int) int {
 	if n < 5 {
 		return 5
 	}
-	if n > 100 {
-		return 100
+	if n > 200 {
+		return 200
 	}
 	return n
 }
@@ -399,6 +418,10 @@ func (e *Engine) setAgent(id, status, last string) {
 }
 
 func (e *Engine) addMessage(agentID, kind, text string) {
+	e.addMessageWithReply(agentID, kind, text, "", "")
+}
+
+func (e *Engine) addMessageWithReply(agentID, kind, text, replyTo, directive string) {
 	e.mu.Lock()
 	roleID := agentID
 	for _, a := range e.state.Agents {
@@ -409,7 +432,14 @@ func (e *Engine) addMessage(agentID, kind, text string) {
 	}
 	e.seq++
 	e.state.Messages = append(e.state.Messages, Message{
-		ID: fmt.Sprintf("m%d", e.seq), Agent: agentID, Role: roleID, Kind: kind, Text: text, Time: now(),
+		ID:        fmt.Sprintf("m%d", e.seq),
+		Agent:     agentID,
+		Role:      roleID,
+		Kind:      kind,
+		Text:      text,
+		Time:      now(),
+		ReplyTo:   replyTo,
+		Directive: directive,
 	})
 	e.state.Updated = now()
 	e.mu.Unlock()
@@ -544,6 +574,49 @@ func (e *Engine) run(ctx context.Context) {
 	if len(ideas) > 6 {
 		ideas = ideas[:6]
 	}
+
+	// ── Debating phase: inter-agent critique and defense ──────────
+	e.setPhase("debating")
+	critics := e.roleAgents("critic")
+	if len(critics) > 0 && len(ideas) > 0 {
+		e.setRole("critic", "thinking", "debating proposals")
+		numDebaters := 2
+		if len(critics) < numDebaters {
+			numDebaters = len(critics)
+		}
+		for i := 0; i < numDebaters; i++ {
+			criticAgent := critics[i]
+			targetIdea := ideas[i%len(ideas)]
+			debatePrompt := e.debateChallengePrompt(criticAgent, targetIdea)
+			challenge, err := e.callAgent(ctx, criticAgent.ID, debatePrompt)
+			if err != nil {
+				e.fail(ctx, err)
+				return
+			}
+			directive, cleanText := extractDirective(challenge, "[CHALLENGE]")
+			e.addMessageWithReply(criticAgent.ID, "debate", cleanText, targetIdea.Agent, directive)
+
+			responderAgent := targetIdea.Agent
+			if !e.hasAgent(responderAgent) {
+				ideatorList := e.roleAgents("ideator")
+				if len(ideatorList) > 0 {
+					responderAgent = ideatorList[0].ID
+				}
+			}
+			if responderAgent != "" {
+				defensePrompt := e.debateDefensePrompt(responderAgent, targetIdea, cleanText)
+				defense, err := e.callAgent(ctx, responderAgent, defensePrompt)
+				if err != nil {
+					e.fail(ctx, err)
+					return
+				}
+				defDirective, defText := extractDirective(defense, "[AMEND]")
+				e.addMessageWithReply(responderAgent, "debate", defText, criticAgent.ID, defDirective)
+			}
+		}
+		e.setRole("critic", "ready", "debated")
+	}
+
 	options := make([]string, 0, len(ideas))
 	for _, idea := range ideas {
 		options = append(options, idea.Title)
@@ -563,6 +636,29 @@ func (e *Engine) run(ctx context.Context) {
 	chosen := ideas[winner]
 
 	e.setPhase("coding")
+
+	// Allocate isolated git worktree if repoDir is a valid git repository
+	var wt *execution.Worktree
+	e.mu.Lock()
+	repoDir := e.repoDir
+	e.mu.Unlock()
+	if repoDir != "" && execution.IsGitRepo(repoDir) {
+		if w, err := execution.CreateWorktree(repoDir, e.state.ID, execution.WorktreeOptions{BranchPrefix: "evolv/swarm-"}); err == nil {
+			wt = w
+			e.mu.Lock()
+			e.worktree = wt
+			e.state.Worktree = wt.Path
+			e.state.Branch = wt.Branch
+			e.mu.Unlock()
+			e.emit()
+			defer func() {
+				if e.state.Status == "error" || e.state.Status == "stopped" {
+					_ = execution.RemoveWorktree(repoDir, wt, true)
+				}
+			}()
+		}
+	}
+
 	code := make([]string, 0, 3)
 	for i, agent := range e.pick("coder", 3) {
 		lens := []string{"smallest working implementation", "robust edge cases", "testable seams"}[i%3]
@@ -572,8 +668,15 @@ func (e *Engine) run(ctx context.Context) {
 			return
 		}
 		e.addMessage(agent.ID, "code", out)
-		e.addArtifact(safeName(chosen.Title)+"-"+agent.ID+".txt", "code", out)
+		artName := safeName(chosen.Title) + "-" + agent.ID + ".txt"
+		e.addArtifact(artName, "code", out)
 		code = append(code, agent.Name+":\n"+out)
+
+		if wt != nil && wt.Active {
+			clean := ExtractCode(out, "file")
+			filePath := filepath.Join(wt.Path, safeName(chosen.Title)+"-"+agent.ID+".txt")
+			_ = os.WriteFile(filePath, []byte(clean), 0o644)
+		}
 	}
 
 	e.setPhase("testing")
@@ -592,6 +695,15 @@ func (e *Engine) run(ctx context.Context) {
 	testText := strings.Join(tests, "\n\n")
 
 	e.setPhase("reviewing")
+	if wt != nil && wt.Active {
+		if diff, err := execution.DiffWorktree(wt); err == nil && diff != "" {
+			e.mu.Lock()
+			e.state.Diff = diff
+			e.mu.Unlock()
+			e.addArtifact("git.diff", "diff", diff)
+		}
+	}
+
 	reviews := make([]string, 0, 3)
 	for _, agent := range e.pick("critic", 3) {
 		out, err := e.callAgent(ctx, agent.ID, e.criticPrompt(agent, chosen, codeText, testText))
@@ -630,6 +742,12 @@ func (e *Engine) run(ctx context.Context) {
 			e.addMessage(agent.ID, "revision", out)
 			e.addArtifact(safeName(chosen.Title)+"-"+agent.ID+"-revised.txt", "revision", out)
 			revised = append(revised, agent.Name+":\n"+out)
+
+			if wt != nil && wt.Active {
+				clean := ExtractCode(out, "file")
+				filePath := filepath.Join(wt.Path, safeName(chosen.Title)+"-"+agent.ID+"-revised.txt")
+				_ = os.WriteFile(filePath, []byte(clean), 0o644)
+			}
 		}
 		codeText = strings.Join(revised, "\n\n")
 		retests := make([]string, 0, 3)
@@ -644,6 +762,15 @@ func (e *Engine) run(ctx context.Context) {
 			retests = append(retests, agent.Name+":\n"+out)
 		}
 		testText = strings.Join(retests, "\n\n")
+
+		if wt != nil && wt.Active {
+			if diff, err := execution.DiffWorktree(wt); err == nil && diff != "" {
+				e.mu.Lock()
+				e.state.Diff = diff
+				e.mu.Unlock()
+				e.addArtifact("git.diff", "diff", diff)
+			}
+		}
 	}
 
 	e.setPhase("judging")
@@ -655,6 +782,14 @@ func (e *Engine) run(ctx context.Context) {
 	}
 	e.addMessage(judge.ID, "final", final)
 	e.addArtifact("final.md", "final", final)
+
+	if decision == "ship" && wt != nil && wt.Active {
+		commitMsg := fmt.Sprintf("feat(swarm): %s", chosen.Title)
+		if hash, err := execution.CommitWorktree(wt, commitMsg); err == nil {
+			wt.Commit = hash
+			e.addMessage(judge.ID, "system", fmt.Sprintf("Committed swarm branch %s (%s)", wt.Branch, hash[:7]))
+		}
+	}
 	for _, role := range Roles {
 		e.setRole(role.ID, "done", "done")
 	}
@@ -876,12 +1011,57 @@ func (e *Engine) batchVotePrompt(role Role, agents []AgentState, question string
 	for i, option := range options {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, option)
 	}
+	e.mu.Lock()
+	var debateSnippets []string
+	for _, m := range e.state.Messages {
+		if m.Kind == "debate" {
+			prefix := m.Directive
+			if prefix == "" {
+				prefix = "[DEBATE]"
+			}
+			debateSnippets = append(debateSnippets, fmt.Sprintf("- %s %s: %s", m.Agent, prefix, clip(m.Text, 140)))
+		}
+	}
+	e.mu.Unlock()
+	if len(debateSnippets) > 0 {
+		b.WriteString("\nDebate highlights:\n")
+		for _, s := range debateSnippets {
+			b.WriteString(s + "\n")
+		}
+	}
 	b.WriteString("\nAgents in this cohort:\n")
 	for _, agent := range agents {
 		b.WriteString("- " + agent.ID + " (" + agent.Name + ")\n")
 	}
 	b.WriteString("\nEvery agent votes independently. Reply with JSON only: {\"votes\":[{\"agent\":\"<id>\",\"choice\":<number>,\"reason\":\"one short sentence\"}]}. Include exactly one vote per agent above.")
 	return b.String()
+}
+
+var directiveRegex = regexp.MustCompile(`^\[(CHALLENGE|AMEND|PROPOSE|CONCEDE|VOTE)\]\s*`)
+
+func extractDirective(text, fallback string) (string, string) {
+	text = strings.TrimSpace(text)
+	if m := directiveRegex.FindStringSubmatch(text); len(m) > 1 {
+		clean := strings.TrimSpace(text[len(m[0]):])
+		return "[" + m[1] + "]", clean
+	}
+	for _, d := range []string{"[CHALLENGE]", "[AMEND]", "[PROPOSE]", "[CONCEDE]"} {
+		if strings.Contains(strings.ToUpper(text), d) {
+			clean := strings.Replace(text, d, "", 1)
+			return d, strings.TrimSpace(clean)
+		}
+	}
+	return fallback, text
+}
+
+func (e *Engine) debateChallengePrompt(agent AgentState, target idea) string {
+	return fmt.Sprintf("Mission: %s\nTarget proposal by %s: %s — %s\n\nYou are %s (Critic). Provide a sharp, constructive challenge to this proposal: identify potential failure modes, hidden complexity, or missing test/security guarantees. Prepend your reply with [CHALLENGE]. Keep it concise (under 3 sentences).",
+		e.mission(), target.Agent, target.Title, target.Pitch, agent.Name)
+}
+
+func (e *Engine) debateDefensePrompt(agentID string, target idea, challenge string) string {
+	return fmt.Sprintf("Mission: %s\nYour proposal: %s — %s\nCritic challenge: %s\n\nYou are %s. Defend or amend your proposal to directly address the critique. If amending, prepend your reply with [AMEND]. Keep it concise (under 3 sentences).",
+		e.mission(), target.Title, target.Pitch, challenge, agentID)
 }
 
 func (e *Engine) ideaPrompt(agents []AgentState) string {

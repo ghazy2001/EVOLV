@@ -93,6 +93,9 @@ func New(ws *workspace.W, b *bus.Bus, ag *agent.Agent, reg *providers.Registry) 
 			s.saveSwarmState(state)
 		}
 	})
+	if s.ws != nil {
+		s.swarm.SetRepoDir(s.ws.Root)
+	}
 	s.loadSwarmState()
 	s.loadAgentProfiles()
 	s.routes()
