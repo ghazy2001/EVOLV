@@ -260,11 +260,7 @@ function organCard(name) {
   const card = document.createElement('div');
   card.className = 'comp-card';
   card.dataset.name = name;
-  card.innerHTML = `<div class="comp-head"><span class="ico">🧩</span><span><div class="name">${escapeHtml(name)}</div><div class="desc">self-authored organ — click to open full-page</div></span><span class="snap" title="capture screenshot & inspect UI">📷</span><span class="full" title="open across the whole window">⤢</span><span class="x" title="ask evolv to remove it">✕</span></div><div class="comp-body"></div>`;
-  card.querySelector('.snap').addEventListener('click', (e) => {
-    e.stopPropagation();
-    captureOrgan(name);
-  });
+  card.innerHTML = `<div class="comp-head"><span class="ico">🧩</span><span><div class="name">${escapeHtml(name)}</div><div class="desc">self-authored organ — click to open full-page</div></span><span class="full" title="open across the whole window">⤢</span><span class="x" title="ask evolv to remove it">✕</span></div><div class="comp-body"></div>`;
   card.querySelector('.x').addEventListener('click', () => send(`remove_component ${name} via remove_component, confirm in one line`));
   card.querySelector('.full').addEventListener('click', () => openOrgan(name));
   card.querySelector('.comp-head .name').addEventListener('click', () => openOrgan(name));
@@ -336,64 +332,6 @@ async function captureOrganOrCanvas(target) {
   }
   return await rasterizeElementToDataURL(el, target);
 }
-
-async function captureOrgan(name) {
-  const card = document.querySelector(`.comp-card[data-name="${CSS.escape(name)}"]`);
-  if (!card) {
-    toast(`Organ "${name}" not found on canvas`);
-    return;
-  }
-  card.classList.add('flash-capture');
-  setTimeout(() => card.classList.remove('flash-capture'), 600);
-  blip(880, 0.08, 'sine', 0.05);
-
-  const body = card.querySelector('.comp-body') || card;
-  const dataUrl = await rasterizeElementToDataURL(body, name);
-  if (!dataUrl) {
-    toast(`⚠️ Could not capture screenshot for ${name}`);
-    return;
-  }
-
-  try {
-    const resp = await fetch('/api/canvas/screenshot', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ target: name, data: dataUrl })
-    });
-    const res = await resp.json();
-    if (res.ok) {
-      toast(`📷 <b>${escapeHtml(name)}</b> screenshot saved · <a href="javascript:askCritique('${escapeHtml(name)}')"><b>Ask EVOLV to critique</b></a>`, 8000);
-    }
-  } catch (err) {
-    toast(`⚠️ Screenshot failed: ${err.message}`);
-  }
-}
-
-async function captureCanvasInteractive() {
-  blip(880, 0.08, 'sine', 0.05);
-  const dataUrl = await captureOrganOrCanvas('canvas');
-  if (!dataUrl) {
-    toast('⚠️ Could not capture canvas screenshot');
-    return;
-  }
-  try {
-    const resp = await fetch('/api/canvas/screenshot', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ target: 'canvas', data: dataUrl })
-    });
-    const res = await resp.json();
-    if (res.ok) {
-      toast('📷 <b>Canvas snapshot</b> saved to <code>workspace/screenshots/canvas.png</code>', 6000);
-    }
-  } catch (err) {
-    toast(`⚠️ Snapshot failed: ${err.message}`);
-  }
-}
-
-window.askCritique = function (name) {
-  send(`Inspect the visual screenshot of the "${name}" component at workspace/screenshots/${name}.png. Assess its layout, visual hierarchy, colors, contrast, and styling, and evolve an improved version of the component.`);
-};
 
 async function rasterizeElementToDataURL(el, title) {
   if (!el) return null;
@@ -1366,10 +1304,6 @@ window.addEventListener('DOMContentLoaded', () => {
   // sound & soul — off until you ask for it
   $('#btn-sound').addEventListener('click', () => setSound(localStorage.getItem('evolv.sound') !== '1'));
   $('#btn-sound').textContent = localStorage.getItem('evolv.sound') === '1' ? '🔊' : '🔇';
-  const btnVision = $('#btn-vision');
-  if (btnVision) {
-    btnVision.addEventListener('click', () => captureCanvasInteractive());
-  }
 
   $('#send').addEventListener('click', () => { if (state.busy) stopGeneration(); else { blip(660, 0.06, 'sine', 0.04); send(); } });
   $('#input').addEventListener('keydown', (e) => {
