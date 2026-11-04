@@ -150,4 +150,10 @@ func TestActionCaptureCanvas(t *testing.T) {
 	if out["path"] != "workspace/screenshots/clock.png" {
 		t.Fatalf("expected path='workspace/screenshots/clock.png', got %v", out["path"])
 	}
+	if imgs := a.PopPendingImages(); len(imgs) != 1 || !strings.HasPrefix(imgs[0], "data:image/png;base64,") {
+		t.Fatalf("expected 1 attached image in agent pendingImages, got %d", len(imgs))
+	}
+	if _, ok := out["data_url"]; ok {
+		t.Fatalf("data_url should not be in tool output json to keep context clean; got %v", out["data_url"])
+	}
 }

@@ -1117,7 +1117,7 @@ func (a *Agent) Execute(act action) string {
 		res["source"] = capRes.Source
 		res["summary"] = capRes.Summary
 		if capRes.DataURL != "" {
-			res["data_url"] = capRes.DataURL
+			a.AttachPendingImage(capRes.DataURL)
 		}
 
 	case "set_plan":

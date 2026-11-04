@@ -141,12 +141,13 @@ function handle(ev) {
     }
     case 'canvas:request_capture': {
       const p = ev.payload || {};
+      if (p.timestamp && Math.abs(Date.now() - p.timestamp) > 5000) return;
       captureOrganOrCanvas(p.target || 'canvas').then((dataUrl) => {
         if (!dataUrl) return;
         fetch('/api/canvas/screenshot', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: p.id, target: p.target || 'canvas', data: dataUrl })
+          body: JSON.stringify({ id: p.id || p.request_id || '', target: p.target || 'canvas', data: dataUrl })
         }).catch((err) => console.warn('[vision] upload error:', err));
       });
       break;

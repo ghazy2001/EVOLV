@@ -105,10 +105,10 @@ func SaveScreenshot(ws *workspace.W, target string, rawBytes []byte, customPath 
 	fileName := fmt.Sprintf("%s-%s.png", target, ts)
 	absPath := filepath.Join(screensDir, fileName)
 	if customPath != "" {
-		if filepath.IsAbs(customPath) {
-			absPath = customPath
-		} else {
-			absPath = ws.Dir(customPath)
+		cleanRel := filepath.Clean(filepath.FromSlash(customPath))
+		candidate := filepath.Join(screensDir, filepath.Base(cleanRel))
+		if err := workspace.CheckWithin(screensDir, candidate); err == nil {
+			absPath = candidate
 		}
 	}
 
@@ -127,6 +127,11 @@ func SaveScreenshot(ws *workspace.W, target string, rawBytes []byte, customPath 
 		source = "browser_live"
 	}
 
+	summary := fmt.Sprintf("Captured %dx%d visual screenshot of '%s' (%d KB)", w, h, target, len(rawBytes)/1024)
+	if source == "layout_synthesizer" {
+		summary = fmt.Sprintf("Generated %dx%d layout placeholder for '%s' (%d KB) (synthetic snapshot: headless environment without live browser window)", w, h, target, len(rawBytes)/1024)
+	}
+
 	res := &CaptureResult{
 		OK:        true,
 		Target:    target,
@@ -137,7 +142,7 @@ func SaveScreenshot(ws *workspace.W, target string, rawBytes []byte, customPath 
 		SizeBytes: int64(len(rawBytes)),
 		Source:    source,
 		DataURL:   dataURL,
-		Summary:   fmt.Sprintf("Captured %dx%d visual screenshot of '%s' (%d KB)", w, h, target, len(rawBytes)/1024),
+		Summary:   summary,
 	}
 	return res, nil
 }
@@ -260,8 +265,9 @@ func (a *Agent) CaptureCanvas(ctx context.Context, target string, savePath strin
 
 		// Ask connected browsers over the bus
 		a.bus.Publish("canvas:request_capture", map[string]any{
-			"id":     reqID,
-			"target": target,
+			"id":        reqID,
+			"target":    target,
+			"timestamp": time.Now().UnixMilli(),
 		})
 
 		// Wait up to 2.5s for live browser capture

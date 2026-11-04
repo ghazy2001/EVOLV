@@ -2198,10 +2198,11 @@ func (s *Server) handleCanvasScreenshot(w http.ResponseWriter, r *http.Request) 
 	switch r.Method {
 	case http.MethodPost:
 		var in struct {
-			ID     string `json:"id"`
-			Target string `json:"target"`
-			Data   string `json:"data"` // base64 or data URL
-			Path   string `json:"path"`
+			ID        string `json:"id"`
+			RequestID string `json:"request_id"`
+			Target    string `json:"target"`
+			Data      string `json:"data"` // base64 or data URL
+			Path      string `json:"path"`
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20)) // 16 MB limit
 		if err != nil {
@@ -2225,14 +2226,18 @@ func (s *Server) handleCanvasScreenshot(w http.ResponseWriter, r *http.Request) 
 		if target == "" {
 			target = "canvas"
 		}
-		res, err := agent.SaveScreenshot(s.ws, target, rawBytes, in.Path, "browser_live")
+		res, err := agent.SaveScreenshot(s.ws, target, rawBytes, "", "browser_live")
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "save screenshot failed: "+err.Error())
 			return
 		}
 		// Fulfill pending capture if an ID was waiting
-		if in.ID != "" && s.ag != nil && s.ag.VisionManager() != nil {
-			s.ag.VisionManager().Resolve(in.ID, res)
+		reqID := in.ID
+		if reqID == "" {
+			reqID = in.RequestID
+		}
+		if reqID != "" && s.ag != nil && s.ag.VisionManager() != nil {
+			s.ag.VisionManager().Resolve(reqID, res)
 		}
 		if s.bus != nil {
 			s.bus.Publish("canvas:screenshot_saved", map[string]any{
@@ -2254,17 +2259,18 @@ func (s *Server) handleCanvasScreenshot(w http.ResponseWriter, r *http.Request) 
 		if target == "" {
 			target = "canvas"
 		}
+		screensDir := s.ws.Dir(workspace.ScreenshotsDir)
 		pathParam := r.URL.Query().Get("path")
 		var absPath string
 		if pathParam != "" {
 			cleanRel := filepath.Clean(filepath.FromSlash(pathParam))
 			absPath = filepath.Join(s.ws.Root, cleanRel)
-			if err := workspace.CheckWithin(s.ws.Root, absPath); err != nil {
+			if err := workspace.CheckWithin(screensDir, absPath); err != nil {
 				http.Error(w, "path escape", http.StatusForbidden)
 				return
 			}
 		} else {
-			absPath = filepath.Join(s.ws.Dir(workspace.ScreenshotsDir), target+".png")
+			absPath = filepath.Join(screensDir, target+".png")
 		}
 		data, err := os.ReadFile(absPath)
 		if err != nil {

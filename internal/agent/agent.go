@@ -49,12 +49,13 @@ type Agent struct {
 	toolFailures       atomic.Int64
 	lastTurnMS         atomic.Int64
 
-	lastAct      time.Time // last real user activity (drives dreaming)
-	dreaming     bool
-	dreamStop    chan struct{}
-	dreamWG      sync.WaitGroup
-	lastSnapshot string
-	visionMgr    *VisionManager
+	lastAct       time.Time // last real user activity (drives dreaming)
+	dreaming      bool
+	dreamStop     chan struct{}
+	dreamWG       sync.WaitGroup
+	lastSnapshot  string
+	visionMgr     *VisionManager
+	pendingImages []string
 }
 
 type Profile struct {
@@ -162,6 +163,31 @@ func (a *Agent) VisionManager() *VisionManager {
 		return nil
 	}
 	return a.visionMgr
+}
+
+// AttachPendingImage buffers an image DataURL to be attached to the next user message turn.
+func (a *Agent) AttachPendingImage(img string) {
+	if a == nil || img == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.pendingImages = append(a.pendingImages, img)
+}
+
+// PopPendingImages retrieves and clears all pending buffered images.
+func (a *Agent) PopPendingImages() []string {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.pendingImages) == 0 {
+		return nil
+	}
+	imgs := a.pendingImages
+	a.pendingImages = nil
+	return imgs
 }
 
 // AgentStats is a cheap, lock-free snapshot of model activity for health and
@@ -669,7 +695,11 @@ func (a *Agent) Chat(ctx context.Context, userMsg string) string {
 		if guard.accountBytes(len(payload)) {
 			payload += "\n\n(result budget reached: summarise what you changed and stop asking for more tool output this turn)"
 		}
-		hist = append(hist, providers.Message{Role: "user", Content: payload})
+		userMsg := providers.Message{Role: "user", Content: payload}
+		if attached := a.PopPendingImages(); len(attached) > 0 {
+			userMsg.Images = attached
+		}
+		hist = append(hist, userMsg)
 		a.bus.Publish("agent:phase", map[string]string{"phase": "evolving"})
 		// visually separate the next stream round in the chat bubble
 		a.bus.Publish("agent:token", map[string]string{"text": "\n\n"})

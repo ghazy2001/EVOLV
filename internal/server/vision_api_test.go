@@ -87,4 +87,12 @@ func TestCanvasScreenshotEndpoints(t *testing.T) {
 	if escapeRec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 forbidden on path escape, got %d", escapeRec.Code)
 	}
+
+	// 5. Check path containment strictly within screenshots directory (e.g. config.json in root must be forbidden)
+	escapeRootReq := httptest.NewRequest(http.MethodGet, "/api/canvas/screenshot?path=config.json", nil)
+	escapeRootRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(escapeRootRec, escapeRootReq)
+	if escapeRootRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 forbidden for path outside screenshots dir (config.json), got %d", escapeRootRec.Code)
+	}
 }
