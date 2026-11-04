@@ -54,6 +54,7 @@ type Agent struct {
 	dreamStop    chan struct{}
 	dreamWG      sync.WaitGroup
 	lastSnapshot string
+	visionMgr    *VisionManager
 }
 
 type Profile struct {
@@ -76,7 +77,7 @@ func NewProfile(ws *workspace.W, b *bus.Bus, prov providers.Provider, model stri
 }
 
 func newAgent(ws *workspace.W, b *bus.Bus, prov providers.Provider, model string, profile *Profile) *Agent {
-	a := &Agent{ws: ws, bus: b, prov: prov, Model: model, maxLoops: 10, lastAct: time.Now(), profile: profile}
+	a := &Agent{ws: ws, bus: b, prov: prov, Model: model, maxLoops: 10, lastAct: time.Now(), profile: profile, visionMgr: NewVisionManager()}
 	a.js = NewJSRuntime(a)
 	a.js.LoadAll()
 	a.loadMemory() // the mind remembers across restarts
@@ -154,6 +155,14 @@ func (a *Agent) Reset() {
 
 // EvolutionCount returns how many mutations have happened.
 func (a *Agent) EvolutionCount() int { return int(a.evolution.Load()) }
+
+// VisionManager returns the agent's visual capture manager.
+func (a *Agent) VisionManager() *VisionManager {
+	if a == nil {
+		return nil
+	}
+	return a.visionMgr
+}
 
 // AgentStats is a cheap, lock-free snapshot of model activity for health and
 // metrics surfaces.
@@ -293,6 +302,9 @@ type action struct {
 	Case           bool              `json:"case,omitempty"`    // case-sensitive search flag
 	Exts           []string          `json:"exts,omitempty"`    // file extensions to filter
 	Limit          int               `json:"limit,omitempty"`   // max search hits or items
+	Target         string            `json:"target,omitempty"`  // target organ or canvas for capture_canvas
+	SavePath       string            `json:"save_path,omitempty"`
+	Format         string            `json:"format,omitempty"` // png | jpeg
 }
 
 func (a *Agent) candidateManager() *candidate.Manager {

@@ -164,6 +164,7 @@ You are in the room too: **type while the colony is working to steer it**, and *
 | `stage_candidate` / `list_candidates` / `promote_candidate` | isolated, hash-pinned kernel proposals with an explicit promotion gate |
 | `self_modify` / `self_update` | compile, test and stage a kernel candidate, or morph to the latest release |
 | `reload_shell` | forces the browser to recompile its UI now |
+| `capture_canvas` | visual snapshot of any organ or the full canvas (PNG + visual metadata) |
 
 Every mutation is logged to `workspace/evolution.jsonl` and streamed to your screen as it happens. And you can play too: **the body is plain files.** Edit anything in `~/.evolv/workspace/` — it hot-reloads.
 
@@ -354,7 +355,7 @@ Treat it like a very eager intern with root: brilliant, fun, supervise according
 - [x] A shell that doesn't embarrass itself — **shipped in v0.8.0** (markdown rendering, copy buttons, streaming caret, welcome screen, genome file deletion)
 - [x] Component marketplace — export / import genomes as `.evolvpack` files (CLI and web API)
 - [x] Swarm mode — 5–100 role-specialised agents think, build, test and vote together; live beta at `/swarm`
-- [ ] Vision — components that can see (canvas screenshots as tool input)
+- [x] Vision — components that can see (canvas screenshots as tool input, browser & headless layout capture)
 - [ ] Voice
 
 ## Changelog (the organism's fossil record)

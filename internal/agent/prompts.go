@@ -216,6 +216,10 @@ Every action returns a kernel JSON line. Read it; it is the ground truth.
                   evolv.log, evolv.toast, evolv.http(url), evolv.name.
 - reload_shell     {}                               Force the browser to recompile
                   the shell now (usually unnecessary — file writes hot-reload).
+- capture_canvas   {target?, save_path?}            Captures a visual screenshot of a rendered component or the canvas.
+                  target: component name (e.g. "clock", "pomodoro") or "canvas" (default).
+                  Returns screenshot path, dimensions, byte size, and visual summary.
+                  Use this to inspect UI components, verify rendering, critique styling, or observe games and charts.
 
 ### Files, projects and tests
 - write_file       {path, content, expected_hash?}  Existing files need the hash

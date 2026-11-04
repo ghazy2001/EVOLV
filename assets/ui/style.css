@@ -409,8 +409,13 @@ and can be opened across the entire window via the ⤢ control. */
 .comp-head .ico { font-size: 14px; }
 .comp-head .name { font-weight: 600; color: var(--text); cursor: pointer; }
 .comp-head .desc { color: var(--faint); font-size: 11px; }
-.comp-head .full {
+.comp-head .snap {
   margin-left: auto; cursor: pointer; color: var(--faint);
+  padding: 2px 7px; border-radius: 6px; transition: all 0.15s; font-size: 13px;
+}
+.comp-head .snap:hover { color: var(--accent); background: var(--accent-soft); }
+.comp-head .full {
+  cursor: pointer; color: var(--faint);
   padding: 2px 7px; border-radius: 6px; transition: all 0.15s; font-size: 13px;
 }
 .comp-head .full:hover { color: var(--accent); background: var(--accent-soft); }
@@ -419,6 +424,14 @@ and can be opened across the entire window via the ⤢ control. */
   padding: 2px 7px; border-radius: 6px; transition: all 0.15s;
 }
 .comp-head .x:hover { color: var(--danger); background: rgba(224, 122, 106, 0.12); }
+.comp-card.flash-capture {
+  animation: flash-shutter 0.5s ease-out;
+}
+@keyframes flash-shutter {
+  0% { box-shadow: 0 0 0 0 rgba(201, 239, 114, 0.8), inset 0 0 30px rgba(201, 239, 114, 0.3); }
+  50% { box-shadow: 0 0 0 6px rgba(201, 239, 114, 0), inset 0 0 45px rgba(201, 239, 114, 0.5); }
+  100% { box-shadow: none; }
+}
 .comp-body { padding: 12px; }
 .comp-body > style { display: none; }
 

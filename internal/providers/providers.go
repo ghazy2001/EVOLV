@@ -21,8 +21,9 @@ import (
 
 // Message is one conversation turn.
 type Message struct {
-	Role    string `json:"role"` // system | user | assistant
-	Content string `json:"content"`
+	Role    string   `json:"role"` // system | user | assistant
+	Content string   `json:"content"`
+	Images  []string `json:"images,omitempty"`
 }
 
 // Delta is a streamed token (or reasoning) chunk.
@@ -167,10 +168,38 @@ func reasoningOf(a, b string) string {
 	return b
 }
 
+func formatOpenAIMessages(msgs []Message) []any {
+	out := make([]any, len(msgs))
+	for i, m := range msgs {
+		if len(m.Images) == 0 {
+			out[i] = m
+			continue
+		}
+		parts := []map[string]any{
+			{"type": "text", "text": m.Content},
+		}
+		for _, img := range m.Images {
+			url := img
+			if !strings.HasPrefix(url, "data:") {
+				url = "data:image/png;base64," + img
+			}
+			parts = append(parts, map[string]any{
+				"type":      "image_url",
+				"image_url": map[string]any{"url": url},
+			})
+		}
+		out[i] = map[string]any{
+			"role":    m.Role,
+			"content": parts,
+		}
+	}
+	return out
+}
+
 func (o *openaiCompat) Stream(ctx context.Context, model string, msgs []Message, onDelta func(Delta)) (string, error) {
 	body := map[string]any{
 		"model":       model,
-		"messages":    msgs,
+		"messages":    formatOpenAIMessages(msgs),
 		"max_tokens":  8192,
 		"temperature": 0.8,
 		"stream":      true,
@@ -429,12 +458,39 @@ func anthropicThinking() bool {
 func (a *anthropic) Stream(ctx context.Context, model string, msgs []Message, onDelta func(Delta)) (string, error) {
 	// split system messages
 	var system strings.Builder
-	rest := make([]Message, 0, len(msgs))
+	rest := make([]any, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Role == "system" {
 			system.WriteString(m.Content + "\n\n")
-		} else {
+		} else if len(m.Images) == 0 {
 			rest = append(rest, m)
+		} else {
+			parts := []map[string]any{
+				{"type": "text", "text": m.Content},
+			}
+			for _, img := range m.Images {
+				raw := img
+				mediaType := "image/png"
+				if strings.HasPrefix(raw, "data:") {
+					partsData := strings.SplitN(raw, ",", 2)
+					if len(partsData) == 2 {
+						mediaType = strings.TrimSuffix(strings.TrimPrefix(partsData[0], "data:"), ";base64")
+						raw = partsData[1]
+					}
+				}
+				parts = append(parts, map[string]any{
+					"type": "image",
+					"source": map[string]any{
+						"type":       "base64",
+						"media_type": mediaType,
+						"data":       raw,
+					},
+				})
+			}
+			rest = append(rest, map[string]any{
+				"role":    m.Role,
+				"content": parts,
+			})
 		}
 	}
 	build := func(thinking bool) []byte {

@@ -166,6 +166,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/wb/delete", s.handleWbDelete)
 	s.mux.HandleFunc("/api/wb/rename", s.handleWbRename)
 	s.mux.HandleFunc("/api/wb/search", s.handleWbSearch)
+	s.mux.HandleFunc("/api/canvas/screenshot", s.handleCanvasScreenshot)
+	s.mux.HandleFunc("/api/canvas/screenshots", s.handleCanvasScreenshots)
 	s.WatchReleases()
 	if s.ag != nil {
 		s.ag.StartDreaming() // the organism wakes itself when idle
@@ -2190,4 +2192,141 @@ func (s *Server) handleUpdateRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]any{"ok": true, "version": ver, "note": "restart evolv to run the new genome"})
+}
+
+func (s *Server) handleCanvasScreenshot(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var in struct {
+			ID     string `json:"id"`
+			Target string `json:"target"`
+			Data   string `json:"data"` // base64 or data URL
+			Path   string `json:"path"`
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20)) // 16 MB limit
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "failed to read body: "+err.Error())
+			return
+		}
+		if err := json.Unmarshal(body, &in); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+		if in.Data == "" {
+			writeJSONError(w, http.StatusBadRequest, "data (base64 image) is required")
+			return
+		}
+		rawBytes, err := agent.DecodeBase64Image(in.Data)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid base64 image: "+err.Error())
+			return
+		}
+		target := in.Target
+		if target == "" {
+			target = "canvas"
+		}
+		res, err := agent.SaveScreenshot(s.ws, target, rawBytes, in.Path, "browser_live")
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "save screenshot failed: "+err.Error())
+			return
+		}
+		// Fulfill pending capture if an ID was waiting
+		if in.ID != "" && s.ag != nil && s.ag.VisionManager() != nil {
+			s.ag.VisionManager().Resolve(in.ID, res)
+		}
+		if s.bus != nil {
+			s.bus.Publish("canvas:screenshot_saved", map[string]any{
+				"target": res.Target,
+				"path":   res.Path,
+				"width":  res.Width,
+				"height": res.Height,
+				"size":   res.SizeBytes,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+
+	case http.MethodGet:
+		target := strings.TrimSpace(r.URL.Query().Get("target"))
+		if target == "" {
+			target = strings.TrimSpace(r.URL.Query().Get("name"))
+		}
+		if target == "" {
+			target = "canvas"
+		}
+		pathParam := r.URL.Query().Get("path")
+		var absPath string
+		if pathParam != "" {
+			cleanRel := filepath.Clean(filepath.FromSlash(pathParam))
+			absPath = filepath.Join(s.ws.Root, cleanRel)
+			if err := workspace.CheckWithin(s.ws.Root, absPath); err != nil {
+				http.Error(w, "path escape", http.StatusForbidden)
+				return
+			}
+		} else {
+			absPath = filepath.Join(s.ws.Dir(workspace.ScreenshotsDir), target+".png")
+		}
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleCanvasScreenshots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	screensDir := s.ws.Dir(workspace.ScreenshotsDir)
+	entries, err := os.ReadDir(screensDir)
+	type item struct {
+		Name      string `json:"name"`
+		Target    string `json:"target"`
+		Path      string `json:"path"`
+		URL       string `json:"url"`
+		SizeBytes int64  `json:"size_bytes"`
+		ModTime   string `json:"mod_time"`
+	}
+	var list []item
+	if err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".png") {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			target := strings.TrimSuffix(e.Name(), ".png")
+			if idx := strings.Index(target, "-20"); idx != -1 {
+				target = target[:idx]
+			}
+			list = append(list, item{
+				Name:      e.Name(),
+				Target:    target,
+				Path:      filepath.ToSlash(filepath.Join(workspace.ScreenshotsDir, e.Name())),
+				URL:       "/api/canvas/screenshot?path=" + filepath.ToSlash(filepath.Join(workspace.ScreenshotsDir, e.Name())),
+				SizeBytes: info.Size(),
+				ModTime:   info.ModTime().UTC().Format(time.RFC3339),
+			})
+		}
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].ModTime > list[j].ModTime
+	})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":          true,
+		"screenshots": list,
+		"count":       len(list),
+	})
 }

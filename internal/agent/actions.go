@@ -1083,6 +1083,43 @@ func (a *Agent) Execute(act action) string {
 		res["ok"] = true
 		res["note"] = "browser is recompiling its shell now"
 
+	case "capture_canvas", "screenshot_organ", "vision_inspect":
+		target := strings.TrimSpace(act.Target)
+		if target == "" {
+			target = strings.TrimSpace(act.Name)
+		}
+		if target == "" && act.Args != nil {
+			if t, ok := act.Args["target"].(string); ok {
+				target = strings.TrimSpace(t)
+			}
+		}
+		if target == "" {
+			target = "canvas"
+		}
+		savePath := strings.TrimSpace(act.SavePath)
+		if savePath == "" && act.Args != nil {
+			if sp, ok := act.Args["save_path"].(string); ok {
+				savePath = strings.TrimSpace(sp)
+			}
+		}
+		capRes, err := a.CaptureCanvas(context.Background(), target, savePath)
+		if err != nil {
+			res["ok"] = false
+			res["error"] = err.Error()
+			break
+		}
+		res["ok"] = capRes.OK
+		res["target"] = capRes.Target
+		res["path"] = capRes.Path
+		res["width"] = capRes.Width
+		res["height"] = capRes.Height
+		res["size_bytes"] = capRes.SizeBytes
+		res["source"] = capRes.Source
+		res["summary"] = capRes.Summary
+		if capRes.DataURL != "" {
+			res["data_url"] = capRes.DataURL
+		}
+
 	case "set_plan":
 		// persistent task state: the agent declares/updates its plan and
 		// the UI renders it live; plan.json survives restarts

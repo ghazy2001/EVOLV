@@ -139,6 +139,18 @@ function handle(ev) {
       if (p.model) $('#model-name').textContent = p.model;
       break;
     }
+    case 'canvas:request_capture': {
+      const p = ev.payload || {};
+      captureOrganOrCanvas(p.target || 'canvas').then((dataUrl) => {
+        if (!dataUrl) return;
+        fetch('/api/canvas/screenshot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: p.id, target: p.target || 'canvas', data: dataUrl })
+        }).catch((err) => console.warn('[vision] upload error:', err));
+      });
+      break;
+    }
   }
 }
 
@@ -248,7 +260,11 @@ function organCard(name) {
   const card = document.createElement('div');
   card.className = 'comp-card';
   card.dataset.name = name;
-  card.innerHTML = `<div class="comp-head"><span class="ico">🧩</span><span><div class="name">${escapeHtml(name)}</div><div class="desc">self-authored organ — click to open full-page</div></span><span class="full" title="open across the whole window">⤢</span><span class="x" title="ask evolv to remove it">✕</span></div><div class="comp-body"></div>`;
+  card.innerHTML = `<div class="comp-head"><span class="ico">🧩</span><span><div class="name">${escapeHtml(name)}</div><div class="desc">self-authored organ — click to open full-page</div></span><span class="snap" title="capture screenshot & inspect UI">📷</span><span class="full" title="open across the whole window">⤢</span><span class="x" title="ask evolv to remove it">✕</span></div><div class="comp-body"></div>`;
+  card.querySelector('.snap').addEventListener('click', (e) => {
+    e.stopPropagation();
+    captureOrgan(name);
+  });
   card.querySelector('.x').addEventListener('click', () => send(`remove_component ${name} via remove_component, confirm in one line`));
   card.querySelector('.full').addEventListener('click', () => openOrgan(name));
   card.querySelector('.comp-head .name').addEventListener('click', () => openOrgan(name));
@@ -303,6 +319,167 @@ function openOrgan(name) {
 function closeOrgan() {
   state.organOpen = null;
   $('#organ-modal').classList.remove('open');
+}
+
+/* ---------------- vision: canvas & organ screenshots ---------------- */
+
+async function captureOrganOrCanvas(target) {
+  let el = null;
+  if (!target || target === 'canvas' || target === 'all') {
+    el = $('#chat-scroll');
+  } else {
+    el = document.querySelector(`.comp-card[data-name="${CSS.escape(target)}"] .comp-body`) ||
+         document.querySelector(`.comp-card[data-name="${CSS.escape(target)}"]`);
+  }
+  if (!el) {
+    el = $('#chat-scroll') || document.body;
+  }
+  return await rasterizeElementToDataURL(el, target);
+}
+
+async function captureOrgan(name) {
+  const card = document.querySelector(`.comp-card[data-name="${CSS.escape(name)}"]`);
+  if (!card) {
+    toast(`Organ "${name}" not found on canvas`);
+    return;
+  }
+  card.classList.add('flash-capture');
+  setTimeout(() => card.classList.remove('flash-capture'), 600);
+  blip(880, 0.08, 'sine', 0.05);
+
+  const body = card.querySelector('.comp-body') || card;
+  const dataUrl = await rasterizeElementToDataURL(body, name);
+  if (!dataUrl) {
+    toast(`⚠️ Could not capture screenshot for ${name}`);
+    return;
+  }
+
+  try {
+    const resp = await fetch('/api/canvas/screenshot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: name, data: dataUrl })
+    });
+    const res = await resp.json();
+    if (res.ok) {
+      toast(`📷 <b>${escapeHtml(name)}</b> screenshot saved · <a href="javascript:askCritique('${escapeHtml(name)}')"><b>Ask EVOLV to critique</b></a>`, 8000);
+    }
+  } catch (err) {
+    toast(`⚠️ Screenshot failed: ${err.message}`);
+  }
+}
+
+async function captureCanvasInteractive() {
+  blip(880, 0.08, 'sine', 0.05);
+  const dataUrl = await captureOrganOrCanvas('canvas');
+  if (!dataUrl) {
+    toast('⚠️ Could not capture canvas screenshot');
+    return;
+  }
+  try {
+    const resp = await fetch('/api/canvas/screenshot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: 'canvas', data: dataUrl })
+    });
+    const res = await resp.json();
+    if (res.ok) {
+      toast('📷 <b>Canvas snapshot</b> saved to <code>workspace/screenshots/canvas.png</code>', 6000);
+    }
+  } catch (err) {
+    toast(`⚠️ Snapshot failed: ${err.message}`);
+  }
+}
+
+window.askCritique = function (name) {
+  send(`Inspect the visual screenshot of the "${name}" component at workspace/screenshots/${name}.png. Assess its layout, visual hierarchy, colors, contrast, and styling, and evolve an improved version of the component.`);
+};
+
+async function rasterizeElementToDataURL(el, title) {
+  if (!el) return null;
+  // If the element has an HTML5 canvas inside, grab its frame directly
+  const c = el.querySelector('canvas');
+  if (c && c.width > 0 && c.height > 0) {
+    try {
+      return c.toDataURL('image/png');
+    } catch (e) {
+      // tainted canvas or other issue: continue to SVG rasterizer
+    }
+  }
+
+  const w = Math.min(Math.max(el.offsetWidth || 640, 320), 1280);
+  const h = Math.min(Math.max(el.offsetHeight || 400, 240), 960);
+
+  try {
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll('script').forEach((s) => s.remove());
+    const serializer = new XMLSerializer();
+    const xhtml = serializer.serializeToString(clone);
+
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+      <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: 12px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #121715; color: #e1ebe6; }
+      </style>
+      <foreignObject width="100%" height="100%">
+        <div xmlns="http://www.w3.org/1999/xhtml">
+          ${xhtml}
+        </div>
+      </foreignObject>
+    </svg>`;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#121715';
+    ctx.fillRect(0, 0, w, h);
+
+    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+
+    return await new Promise((resolve) => {
+      img.onload = () => {
+        try {
+          ctx.drawImage(img, 0, 0);
+          URL.revokeObjectURL(url);
+          resolve(canvas.toDataURL('image/png'));
+        } catch (e) {
+          URL.revokeObjectURL(url);
+          resolve(makeFallbackDataURL(w, h, title));
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(makeFallbackDataURL(w, h, title));
+      };
+      img.src = url;
+    });
+  } catch (err) {
+    return makeFallbackDataURL(w, h, title);
+  }
+}
+
+function makeFallbackDataURL(w, h, title) {
+  const c = document.createElement('canvas');
+  c.width = w || 640;
+  c.height = h || 400;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#121715';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.strokeStyle = '#273831';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(12, 12, c.width - 24, c.height - 24);
+  ctx.fillStyle = '#1a2320';
+  ctx.fillRect(12, 12, c.width - 24, 48);
+  ctx.fillStyle = '#c9ef72';
+  ctx.font = 'bold 16px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillText('EVOLV VISION · ' + (title || 'Organ'), 28, 42);
+  ctx.fillStyle = '#8ca398';
+  ctx.font = '12px monospace';
+  ctx.fillText(`Snapshot ${c.width}x${c.height} · ${new Date().toLocaleTimeString()}`, 28, 90);
+  return c.toDataURL('image/png');
 }
 
 /* ---------------- evolution stream (sidebar) ---------------- */
@@ -1189,6 +1366,10 @@ window.addEventListener('DOMContentLoaded', () => {
   // sound & soul — off until you ask for it
   $('#btn-sound').addEventListener('click', () => setSound(localStorage.getItem('evolv.sound') !== '1'));
   $('#btn-sound').textContent = localStorage.getItem('evolv.sound') === '1' ? '🔊' : '🔇';
+  const btnVision = $('#btn-vision');
+  if (btnVision) {
+    btnVision.addEventListener('click', () => captureCanvasInteractive());
+  }
 
   $('#send').addEventListener('click', () => { if (state.busy) stopGeneration(); else { blip(660, 0.06, 'sine', 0.04); send(); } });
   $('#input').addEventListener('keydown', (e) => {

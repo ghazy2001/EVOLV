@@ -21,21 +21,22 @@ import (
 
 // Layout of the organism on disk.
 const (
-	RootDir       = ".evolv"
-	WorkspaceDir  = "workspace" // the whole served UI + everything evolvable
-	UIDir         = "workspace/ui"
-	ComponentsDir = "workspace/ui/components" // hot-mounted panels
-	PluginsDir    = "workspace/plugins"       // JS plugins (goja)
-	ToolsDir      = "workspace/tools"         // JS tool handlers
-	SkillsDir     = "workspace/skills"        // markdown skills
-	PromptsDir    = "workspace/prompts"       // system prompt fragments (evolvable)
-	LogsDir       = "logs"
-	ConfigFile    = "config.json"
-	ManifestFile  = "workspace/manifest.json"
-	EvolutionFile = "workspace/evolution.jsonl" // append-only mutation history
-	PlanFile      = "workspace/plan.json"       // the agent's current task plan
-	RepoMapFile   = "workspace/repo-map.json"   // cached repository tree + symbol outline
-	CandidatesDir = "workspace/candidates"      // isolated, auditable self-evolution proposals
+	RootDir        = ".evolv"
+	WorkspaceDir   = "workspace" // the whole served UI + everything evolvable
+	UIDir          = "workspace/ui"
+	ComponentsDir  = "workspace/ui/components" // hot-mounted panels
+	PluginsDir     = "workspace/plugins"       // JS plugins (goja)
+	ToolsDir       = "workspace/tools"         // JS tool handlers
+	SkillsDir      = "workspace/skills"        // markdown skills
+	PromptsDir     = "workspace/prompts"       // system prompt fragments (evolvable)
+	LogsDir        = "logs"
+	ConfigFile     = "config.json"
+	ManifestFile   = "workspace/manifest.json"
+	EvolutionFile  = "workspace/evolution.jsonl" // append-only mutation history
+	PlanFile       = "workspace/plan.json"       // the agent's current task plan
+	RepoMapFile    = "workspace/repo-map.json"   // cached repository tree + symbol outline
+	CandidatesDir  = "workspace/candidates"      // isolated, auditable self-evolution proposals
+	ScreenshotsDir = "workspace/screenshots"     // visual canvas & organ screenshots
 )
 
 // Config is the user-editable kernel config.
@@ -214,7 +215,7 @@ func Load(uiFS fs.FS) (*W, error) {
 		w.SaveConfig()
 	}
 	// directories
-	for _, d := range []string{WorkspaceDir, UIComponentsRel(), PluginsDir, ToolsDir, SkillsDir, PromptsDir, CandidatesDir, LogsDir, SnapshotsDir} {
+	for _, d := range []string{WorkspaceDir, UIComponentsRel(), PluginsDir, ToolsDir, SkillsDir, PromptsDir, CandidatesDir, LogsDir, SnapshotsDir, ScreenshotsDir} {
 		if err := os.MkdirAll(w.Dir(d), 0o755); err != nil {
 			return nil, err
 		}
