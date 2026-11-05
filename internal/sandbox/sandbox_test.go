@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,13 +37,22 @@ func TestLocalRunnerBasic(t *testing.T) {
 
 	// 3. Timeout enforcement
 	shortLimits := Limits{Timeout: 50 * time.Millisecond}
-	// Sleep command that exceeds timeout
 	var sleepCmd string
-	if strings.Contains(strings.ToLower(r.Name()), "win") || true {
-		sleepCmd = "powershell -Command Start-Sleep -Milliseconds 400"
+	if strings.Contains(strings.ToLower(r.Name()), "win") || runtime.GOOS == "windows" {
+		sleepCmd = "ping -n 2 127.0.0.1 >nul"
+	} else {
+		sleepCmd = "sleep 1"
 	}
 	resTimeout, _ := r.Run(ctx, sleepCmd, "", nil, shortLimits)
-	if resTimeout != nil && !resTimeout.TimedOut && resTimeout.ExitCode == 0 {
-		t.Logf("note: timeout command completed before deadline, duration: %v", resTimeout.Duration)
+	if resTimeout != nil && !resTimeout.TimedOut {
+		t.Fatalf("expected command to time out, duration: %v", resTimeout.Duration)
+	}
+}
+
+func TestContainerRunnerRequiresEngine(t *testing.T) {
+	cr := NewContainerRunner("alpine:latest", false)
+	_, err := cr.Run(context.Background(), "echo test", "", nil, DefaultLimits())
+	if err != nil && !errors.Is(err, ErrContainerUnavailable) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

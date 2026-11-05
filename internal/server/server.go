@@ -71,6 +71,7 @@ type Server struct {
 	execStore     *execution.Store
 	execMu        sync.Mutex
 	cloudAPI      *cloud.API
+	deployMgr     *deploy.Manager
 }
 
 // New builds the server.
@@ -102,6 +103,9 @@ func New(ws *workspace.W, b *bus.Bus, ag *agent.Agent, reg *providers.Registry) 
 	}
 	s.loadSwarmState()
 	s.loadAgentProfiles()
+	if s.ws != nil {
+		s.deployMgr = deploy.NewManager(s.ws)
+	}
 	cloudMeter := cloud.NewMeter()
 	cloudBot := cloud.NewBot(os.Getenv("EVOLV_GITHUB_WEBHOOK_SECRET"), cloudMeter, nil, nil)
 	s.cloudAPI = cloud.NewAPI(cloudBot, cloudMeter)
@@ -179,6 +183,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/voice/history", s.handleVoiceHistory)
 	s.mux.HandleFunc("/api/deploy", s.handleDeploy)
 	s.mux.HandleFunc("/api/deploy/list", s.handleDeployList)
+	s.mux.HandleFunc("/deploy/", s.handleDeployPreview)
 	if s.cloudAPI != nil {
 		s.cloudAPI.RegisterRoutes(s.mux)
 	}
@@ -2427,8 +2432,10 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		Target    string `json:"target"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
-	mgr := deploy.NewManager(s.ws)
-	dep, err := mgr.DeployPackage(r.Context(), in.Component, in.Target)
+	if s.deployMgr == nil {
+		s.deployMgr = deploy.NewManager(s.ws)
+	}
+	dep, err := s.deployMgr.DeployPackage(r.Context(), in.Component, in.Target)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -2445,12 +2452,56 @@ func (s *Server) handleDeployList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	mgr := deploy.NewManager(s.ws)
-	list := mgr.List()
+	if s.deployMgr == nil {
+		s.deployMgr = deploy.NewManager(s.ws)
+	}
+	list := s.deployMgr.List()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":          true,
 		"deployments": list,
 		"count":       len(list),
 	})
+}
+
+func (s *Server) handleDeployPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.ws == nil {
+		http.NotFound(w, r)
+		return
+	}
+	rel := strings.TrimPrefix(r.URL.Path, "/deploy/")
+	if rel == "" || strings.Contains(rel, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	baseDir := filepath.Clean(filepath.Join(s.ws.Root, "workspace", "deploy"))
+	fullPath := filepath.Clean(filepath.Join(baseDir, filepath.FromSlash(rel)))
+	if !strings.HasPrefix(fullPath, baseDir) {
+		http.NotFound(w, r)
+		return
+	}
+	fi, err := os.Stat(fullPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if fi.IsDir() {
+		fullPath = filepath.Join(fullPath, "index.html")
+	}
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.HasSuffix(fullPath, ".html") {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	} else if strings.HasSuffix(fullPath, ".json") {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content)
 }

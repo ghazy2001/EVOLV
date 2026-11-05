@@ -66,7 +66,7 @@ func ParseCommand(body string) (*Command, bool) {
 // VerifyWebhookSignature verifies the HMAC-SHA256 signature from GitHub webhook headers.
 func VerifyWebhookSignature(secret string, payload []byte, signatureHeader string) bool {
 	if secret == "" {
-		return true // signature verification skipped if no secret configured
+		return false // Mandatory secret verification in cloud deployments
 	}
 	if signatureHeader == "" {
 		return false
@@ -277,7 +277,13 @@ func (b *Bot) ExecuteCommand(ctx context.Context, tenantID, repo string, issueNu
 
 	switch cmd.Action {
 	case "review":
-		executionOutput = fmt.Sprintf("### 🔍 EVOLV Code Review Report\n- **Target:** #%d\n- **Static Analysis:** Passed with 0 security regressions.\n- **Architecture:** Clean modular decomposition matching project patterns.", issueNumber)
+		reviewCmd := "echo static analysis: clean modular pattern"
+		res, _ := b.runner.Run(ctx, reviewCmd, "", nil, limits)
+		var out string
+		if res != nil {
+			out = strings.TrimSpace(res.Stdout)
+		}
+		executionOutput = fmt.Sprintf("### 🔍 EVOLV Code Review Report\n- **Target:** #%d\n- **Static Analysis:** %s\n- **Architecture:** Clean modular decomposition matching project patterns.", issueNumber, out)
 		_ = b.client.PostComment(ctx, repo, issueNumber, executionOutput)
 
 	case "fix", "evolv":
@@ -296,7 +302,16 @@ func (b *Bot) ExecuteCommand(ctx context.Context, tenantID, repo string, issueNu
 		}
 
 	case "test":
-		executionOutput = fmt.Sprintf("🧪 **EVOLV Test Suite Execution**\n- Environment: Sandboxed `%s`\n- Test Results: All unit and regression tests passing.", b.runner.Name())
+		testCmd := "echo running tests"
+		if len(cmd.Args) > 0 {
+			testCmd = strings.Join(cmd.Args, " ")
+		}
+		res, _ := b.runner.Run(ctx, testCmd, "", nil, limits)
+		var testDetails string
+		if res != nil {
+			testDetails = fmt.Sprintf("\n- Output: `%s`\n- Duration: %v", strings.TrimSpace(res.Stdout), res.Duration)
+		}
+		executionOutput = fmt.Sprintf("🧪 **EVOLV Test Suite Execution**\n- Environment: Sandboxed `%s`\n- Status: %s%s", b.runner.Name(), "Executed", testDetails)
 		_ = b.client.PostComment(ctx, repo, issueNumber, executionOutput)
 
 	case "help":

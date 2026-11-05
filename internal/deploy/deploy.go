@@ -47,6 +47,9 @@ func NewManager(ws *workspace.W) *Manager {
 // DeployPackage builds a standalone, zero-dependency production bundle from an organ.
 func (m *Manager) DeployPackage(ctx context.Context, compName, target string) (*Deployment, error) {
 	compName = strings.TrimSpace(compName)
+	if strings.Contains(compName, "..") || strings.ContainsAny(compName, "/\\") {
+		return nil, errors.New("invalid component name: path traversal characters not allowed")
+	}
 	if compName == "" {
 		compName = "canvas"
 	}
@@ -60,13 +63,16 @@ func (m *Manager) DeployPackage(ctx context.Context, compName, target string) (*
 		return nil, fmt.Errorf("create deploy dir: %w", err)
 	}
 
-	// Read component HTML source
+	// Read component HTML source safely
 	var compHTML string
 	if compName != "canvas" {
-		compPath := filepath.Join(m.ws.Root, "workspace", "ui", "components", compName+".html")
-		raw, err := os.ReadFile(compPath)
-		if err == nil {
-			compHTML = string(raw)
+		expectedDir := filepath.Clean(filepath.Join(m.ws.Root, "workspace", "ui", "components"))
+		compPath := filepath.Clean(filepath.Join(expectedDir, compName+".html"))
+		if strings.HasPrefix(compPath, expectedDir) {
+			raw, err := os.ReadFile(compPath)
+			if err == nil {
+				compHTML = string(raw)
+			}
 		}
 	}
 	if compHTML == "" {

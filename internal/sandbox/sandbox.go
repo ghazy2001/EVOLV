@@ -147,9 +147,59 @@ func NewContainerRunner(image string, network bool) *ContainerRunner {
 // Name returns the runner identifier.
 func (c *ContainerRunner) Name() string { return fmt.Sprintf("container(%s)", c.Image) }
 
+// ErrContainerUnavailable indicates that no container engine is running.
+var ErrContainerUnavailable = errors.New("container execution backend unavailable")
+
 // Run executes the command inside a container sandbox.
 func (c *ContainerRunner) Run(ctx context.Context, command string, dir string, env []string, limits Limits) (*Result, error) {
-	// If local docker daemon is not available, fail politely or fall back
-	local := NewLocalRunner()
-	return local.Run(ctx, command, dir, env, limits)
+	dockerPath, err := exec.LookPath("docker")
+	if err != nil {
+		return nil, ErrContainerUnavailable
+	}
+
+	if limits.Timeout <= 0 {
+		limits.Timeout = 30 * time.Second
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, limits.Timeout)
+	defer cancel()
+
+	args := []string{"run", "--rm"}
+	if !c.Network {
+		args = append(args, "--network=none")
+	}
+	if dir != "" {
+		args = append(args, "-v", fmt.Sprintf("%s:%s", dir, "/workspace"), "-w", "/workspace")
+	}
+	args = append(args, c.Image, "sh", "-c", command)
+
+	cmd := exec.CommandContext(execCtx, dockerPath, args...)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	start := time.Now()
+	err = cmd.Run()
+	duration := time.Since(start)
+	timedOut := errors.Is(execCtx.Err(), context.DeadlineExceeded)
+
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else if timedOut {
+			exitCode = 124
+		} else {
+			exitCode = 1
+		}
+	}
+
+	return &Result{
+		ExitCode: exitCode,
+		Stdout:   stdoutBuf.String(),
+		Stderr:   stderrBuf.String(),
+		Duration: duration,
+		TimedOut: timedOut,
+	}, nil
 }

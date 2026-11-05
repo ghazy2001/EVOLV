@@ -64,3 +64,23 @@ func TestDeployPackage(t *testing.T) {
 		t.Fatalf("expected 1 deployment in list, got %d", len(all))
 	}
 }
+
+func TestDeployPackagePathTraversal(t *testing.T) {
+	td := t.TempDir()
+	t.Setenv("HOME", td)
+	t.Setenv("USERPROFILE", td)
+	ws, err := workspace.Load(nil)
+	if err != nil {
+		t.Fatalf("workspace.Load: %v", err)
+	}
+
+	mgr := NewManager(ws)
+	ctx := context.Background()
+
+	badNames := []string{"../../etc/passwd", "../secret", "foo/bar", "foo\\bar"}
+	for _, bad := range badNames {
+		if _, err := mgr.DeployPackage(ctx, bad, "bundle"); err == nil {
+			t.Errorf("expected error for path traversal name %q, got nil", bad)
+		}
+	}
+}
