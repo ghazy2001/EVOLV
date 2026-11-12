@@ -6,15 +6,15 @@
 
 **EVOLV is a self-evolving AI agent workspace: a self-modifying coding agent that grows its own UI, tools, skills, prompts and plugins live while you watch.** Local-first, single Go binary, works with Ollama or any API key — and the demo below needs none.
 
-[![GitHub stars](https://img.shields.io/github/stars/dxn111/EVOLV?style=flat-square&color=8b5cf6)](https://github.com/dxn111/EVOLV/stargazers)
-[![CI](https://github.com/dxn111/EVOLV/actions/workflows/ci.yml/badge.svg)](https://github.com/dxn111/EVOLV/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/ghazy2001/EVOLV?style=flat-square&color=8b5cf6)](https://github.com/ghazy2001/EVOLV/stargazers)
+[![CI](https://github.com/ghazy2001/EVOLV/actions/workflows/ci.yml/badge.svg)](https://github.com/ghazy2001/EVOLV/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-8b93ab?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/dxn111/EVOLV?style=flat-square&color=22d3ee)](https://github.com/dxn111/EVOLV/releases)
+[![Release](https://img.shields.io/github/v/tag/ghazy2001/EVOLV?label=release&style=flat-square&color=22d3ee)](https://github.com/ghazy2001/EVOLV/tags)
 
 **No API key. No signup. One command.**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dxn111/EVOLV/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ghazy2001/EVOLV/main/install.sh | sh
 ```
 
 ```bash
@@ -175,10 +175,10 @@ Every mutation is logged to `workspace/evolution.jsonl` and streamed to your scr
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dxn111/EVOLV/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ghazy2001/EVOLV/main/install.sh | sh
 ```
 
-The installer detects your OS/arch, downloads the prebuilt binary (or builds from source if needed), puts `evolv` on your PATH, and prints a launch card. Check what it would install first with `install.sh --version`, or pin a release with `EVOLV_VERSION=v0.22.0 install.sh`.
+The installer detects your OS/arch, downloads the prebuilt binary (or builds from source if needed), puts `evolv` on your PATH, and prints a launch card. Check what it would install first with `install.sh --version`, or pin a release with `EVOLV_VERSION=v0.33.0 install.sh`.
 
 **Full documentation:** [docs/index.html](docs/index.html) — a single-page guide generated straight from this README (`go run ./cmd/evolv-docs`), plus the [24-hour master plan](docs/EVOLV-24H-MASTERPLAN.md).
 
@@ -187,14 +187,14 @@ The installer detects your OS/arch, downloads the prebuilt binary (or builds fro
 
 ```bash
 # with Go toolchain
-go install github.com/dxn111/EVOLV/evolv@latest
+go install github.com/ghazy2001/EVOLV/evolv@latest
 
 # from source
-git clone https://github.com/dxn111/EVOLV
+git clone https://github.com/ghazy2001/EVOLV
 cd EVOLV && make install
 
 # grab a binary from Releases
-# macOS / Linux / Windows (amd64 + arm64) — see github.com/dxn111/EVOLV/releases
+# macOS / Linux / Windows (amd64 + arm64) — see github.com/ghazy2001/EVOLV/releases
 ```
 </details>
 
@@ -426,7 +426,7 @@ Because it does. Literally. You watched it happen in the GIF.
 The most fun repo on your machine to hack on:
 
 ```bash
-git clone https://github.com/dxn111/EVOLV && cd EVOLV
+git clone https://github.com/ghazy2001/EVOLV && cd EVOLV
 make build && ./evolv
 ```
 
@@ -440,13 +440,13 @@ make cross     # verify every release target still builds
 
 CI (`.github/workflows/ci.yml`) runs formatting, tidy/docs checks, tests + coverage, a real-server boot/SIGTERM smoke, the full-module race detector, Go version compatibility, and cross-builds Linux/macOS/Windows on every push and pull request. Releases are validated with the latest patched Go 1.26.x, smoke-tested, checksummed and provenance-attested before the binaries are published.
 
-Ideas that would be amazing: new protocol actions, a genome inspector UI, evolution replay/branching, ports to new platforms. Open an issue or ping me directly — **I answer everything.**
+Ideas that would be amazing: new protocol actions, a genome inspector UI, evolution replay/branching, ports to new platforms. Open an issue or ping directly.
 
 ## Support & ideas
 
-- **dxn1.0day@gmail.com** · Discord **@dxn1_ai**
+- **mahmoudghazy2001@gmail.com** · GitHub **[@ghazy2001](https://github.com/ghazy2001)**
 
-If EVOLV made you say "wait, WHAT?" — a star genuinely helps other people find it. And if you want to help the mutation spread: [tweet about it](https://twitter.com/intent/tweet?text=EVOLV%20is%20an%20AI%20workspace%20that%20rewrites%20its%20own%20UI%2C%20tools%20and%20prompts%20while%20it%20runs.%20Watch%20it%20happen%3A&url=https%3A%2F%2Fgithub.com%2Fdxn111%2FEVOLV), post it on r/LocalLLaMA, or send the GIF to one friend who won't believe it.
+If EVOLV made you say "wait, WHAT?" — a star genuinely helps other people find it. And if you want to help the mutation spread: [tweet about it](https://twitter.com/intent/tweet?text=EVOLV%20is%20an%20AI%20workspace%20that%20rewrites%20its%20own%20UI%2C%20tools%20and%20prompts%20while%20it%20runs.%20Watch%20it%20happen%3A&url=https%3A%2F%2Fgithub.com%2Fghazy2001%2FEVOLV), post it on r/LocalLLaMA, or send the GIF to one friend who won't believe it.
 
 <details>
 <summary><b>About / keywords</b></summary>
@@ -455,10 +455,10 @@ EVOLV — self-evolving AI workspace. AI that rewrites its own UI, tools and pro
 
 <div align="center">
 
-[![Star History Chart](https://api.star-history.com/svg?repos=dxn111/EVOLV&type=Date)](https://star-history.com/#dxn111/EVOLV&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=ghazy2001/EVOLV&type=Date)](https://star-history.com/#ghazy2001/EVOLV&Date)
 
 </div>
 
 ## License
 
-MIT © [dxn111](https://github.com/dxn111)
+MIT © [Mahmoud Ghazy (@ghazy2001)](https://github.com/ghazy2001) & EVOLV Contributors
